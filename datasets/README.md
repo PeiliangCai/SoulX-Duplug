@@ -1,7 +1,7 @@
 # 下载所有数据集
 
 ```bash
-cd /root/autodl-tmp/datasets
+cd /root/SoulX-Duplug/datasets
 export HF_TOKEN=hf_xxx
 ./download_all_datasets.sh
 ```
@@ -9,9 +9,9 @@ export HF_TOKEN=hf_xxx
 日志文件：
 
 ```bash
-/root/autodl-tmp/datasets/download.log
+/root/SoulX-Duplug/datasets/download.log
 ```
 
 ```bash
-tail -f /root/autodl-tmp/datasets/download.log
+tail -f /root/SoulX-Duplug/datasets/download.log
 ```
