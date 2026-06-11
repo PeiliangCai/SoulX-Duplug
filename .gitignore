@@ -1,0 +1,14 @@
+datasets/aishell*/
+datasets/librispeech/
+datasets/magicdata/
+datasets/gigaspeech/
+datasets/wenetspeech/
+datasets/normalized/
+datasets/*.tgz
+datasets/*.tar.gz
+datasets/*.tar
+datasets/*.part
+datasets/*.aria2
+datasets/*.log
+datasets/.dataset-download-env/
+datasets/**/.download-state.json

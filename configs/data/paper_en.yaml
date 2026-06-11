@@ -1,0 +1,40 @@
+name: paper_en
+dedup: source_text
+
+datasets:
+  - id: librispeech
+    lang: en
+    download:
+      source_dataset: librispeech
+      files: all
+      dedup_key: openslr:slr12:librispeech
+  - id: gigaspeech
+    lang: en
+    subset: XL
+    download:
+      source_dataset: gigaspeech
+      hf_include:
+        - "(?i)(XL|GigaSpeech\\.json|metadata)"
+      dedup_key: hf:speechcolab/gigaspeech:xl
+  - id: commonvoice-en
+    enabled: false
+    lang: en
+    provider: voxbox
+    download:
+      source_dataset: voxbox
+      hf_include:
+        - "(?i)(commonvoice|common_voice|cv).*(en|english)"
+      dedup_key: voxbox:commonvoice:en
+      fallback:
+        source_dataset: commonvoice-en
+  - id: emilia-en
+    enabled: false
+    lang: en
+    provider: voxbox
+    download:
+      source_dataset: voxbox
+      hf_include:
+        - "(?i)(emilia).*(en|english)"
+      dedup_key: voxbox:emilia:en
+      fallback:
+        source_dataset: emilia-en

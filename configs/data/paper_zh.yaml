@@ -1,0 +1,49 @@
+name: paper_zh
+dedup: source_text
+
+datasets:
+  - id: aishell1
+    lang: zh
+    download:
+      source_dataset: aishell1
+      files: all
+      dedup_key: openslr:slr33:aishell1
+  - id: aishell3
+    lang: zh
+    download:
+      source_dataset: aishell3
+      files: all
+      dedup_key: openslr:slr93:aishell3
+  - id: wenetspeech
+    lang: zh
+    download:
+      source_dataset: wenetspeech
+      dedup_key: manual:wenetspeech
+  - id: magicdata
+    lang: zh
+    download:
+      source_dataset: magicdata
+      files: all
+      dedup_key: openslr:slr68:magicdata
+  - id: commonvoice-cn
+    enabled: false
+    lang: zh
+    provider: voxbox
+    download:
+      source_dataset: voxbox
+      hf_include:
+        - "(?i)(commonvoice|common_voice|cv).*(zh|cn|chinese|mandarin)"
+      dedup_key: voxbox:commonvoice:zh
+      fallback:
+        source_dataset: commonvoice-cn
+  - id: emilia-cn
+    enabled: false
+    lang: zh
+    provider: voxbox
+    download:
+      source_dataset: voxbox
+      hf_include:
+        - "(?i)(emilia).*(zh|cn|chinese|mandarin)"
+      dedup_key: voxbox:emilia:zh
+      fallback:
+        source_dataset: emilia-cn
