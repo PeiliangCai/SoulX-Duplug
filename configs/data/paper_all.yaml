@@ -1,5 +1,8 @@
 name: paper_all
 dedup: source_text
+target_hours:
+  zh: 47000
+  en: 31000
 
 datasets:
   - id: aishell1
@@ -26,7 +29,6 @@ datasets:
       files: all
       dedup_key: openslr:slr68:magicdata
   - id: commonvoice-cn
-    enabled: false
     lang: zh
     provider: voxbox
     download:
@@ -34,10 +36,7 @@ datasets:
       hf_include:
         - "(?i)(commonvoice|common_voice|cv).*(zh|cn|chinese|mandarin)"
       dedup_key: voxbox:commonvoice:zh
-      fallback:
-        source_dataset: commonvoice-cn
   - id: emilia-cn
-    enabled: false
     lang: zh
     provider: voxbox
     download:
@@ -45,8 +44,6 @@ datasets:
       hf_include:
         - "(?i)(emilia).*(zh|cn|chinese|mandarin)"
       dedup_key: voxbox:emilia:zh
-      fallback:
-        source_dataset: emilia-cn
   - id: librispeech
     lang: en
     download:
@@ -62,7 +59,6 @@ datasets:
         - "(?i)(XL|GigaSpeech\\.json|metadata)"
       dedup_key: hf:speechcolab/gigaspeech:xl
   - id: commonvoice-en
-    enabled: false
     lang: en
     provider: voxbox
     download:
@@ -70,10 +66,7 @@ datasets:
       hf_include:
         - "(?i)(commonvoice|common_voice|cv).*(en|english)"
       dedup_key: voxbox:commonvoice:en
-      fallback:
-        source_dataset: commonvoice-en
   - id: emilia-en
-    enabled: false
     lang: en
     provider: voxbox
     download:
@@ -81,5 +74,3 @@ datasets:
       hf_include:
         - "(?i)(emilia).*(en|english)"
       dedup_key: voxbox:emilia:en
-      fallback:
-        source_dataset: emilia-en

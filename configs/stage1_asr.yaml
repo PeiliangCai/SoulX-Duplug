@@ -1,0 +1,38 @@
+seed: 1337
+device: cuda
+output_dir: outputs/stage1
+
+audio:
+  target_sample_rate: 16000
+
+tokenizer:
+  # Use "glm4voice" for the paper path once the official tokenizer code/checkpoint is available.
+  backend: dummy
+  vocab_size: 256
+  token_rate_hz: 12.5
+
+model:
+  # Use "qwen" with model_name_or_path: Qwen/Qwen3-0.6B for the paper path.
+  backend: dummy
+  hidden_size: 128
+  model_name_or_path: Qwen/Qwen3-0.6B
+
+data:
+  train_manifest: manifests/stage1/train.normalized.jsonl
+  dev_manifest: manifests/stage1/dev.normalized.jsonl
+  limit_train_samples:
+  limit_dev_samples:
+  max_audio_tokens: 1024
+  max_text_tokens: 256
+
+training:
+  batch_size: 4
+  eval_batch_size: 4
+  gradient_accumulation_steps: 1
+  learning_rate: 0.0003
+  weight_decay: 0.01
+  max_steps: 1000
+  log_every: 10
+  eval_every: 100
+  save_every: 500
+  max_new_tokens: 128

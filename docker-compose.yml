@@ -1,0 +1,27 @@
+services:
+  soulx:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: soulx-duplug:latest
+    container_name: soulx-duplug
+    working_dir: /workspace/SoulX-Duplug
+    shm_size: "16gb"
+    ipc: host
+    tty: true
+    stdin_open: true
+    gpus: all
+    environment:
+      DATA_ROOT: /data/datasets
+      MODEL_ROOT: /data/models
+      CACHE_ROOT: /data/cache
+      OUTPUT_ROOT: /data/outputs
+      HF_HOME: /data/cache/huggingface
+      MODELSCOPE_CACHE: /data/cache/modelscope
+      HF_TOKEN: ${HF_TOKEN:-}
+    volumes:
+      - .:/workspace/SoulX-Duplug
+      - ${DATA_ROOT:-/data/soulx/datasets}:/data/datasets
+      - ${MODEL_ROOT:-/data/soulx/models}:/data/models
+      - ${CACHE_ROOT:-/data/soulx/cache}:/data/cache
+      - ${OUTPUT_ROOT:-/data/soulx/outputs}:/data/outputs

@@ -1,0 +1,13 @@
+# PyTorch is provided by the Docker base image.
+# For non-Docker installs, install the matching CUDA/CPU torch wheel first.
+numpy
+PyYAML
+transformers>=4.51.0,<4.52.0
+accelerate
+peft
+soundfile
+librosa
+funasr
+modelscope
+whisperx
+huggingface_hub

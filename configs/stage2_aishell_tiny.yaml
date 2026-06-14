@@ -1,0 +1,35 @@
+seed: 1337
+device: cpu
+output_dir: ${OUTPUT_ROOT}/stage2_aishell_tiny
+stage1_checkpoint:
+
+audio:
+  target_sample_rate: 16000
+  chunk_seconds: 0.16
+  lookback_seconds: 0.96
+  lookahead_seconds: 0.04
+
+tokenizer:
+  backend: dummy
+  vocab_size: 256
+  token_rate_hz: 12.5
+
+model:
+  backend: dummy
+  hidden_size: 128
+
+data:
+  train_manifest: manifests/aishell_tiny/stage2/train.jsonl
+  dev_manifest: manifests/aishell_tiny/stage2/dev.jsonl
+  max_sequence_length: 2048
+
+training:
+  batch_size: 2
+  eval_batch_size: 2
+  gradient_accumulation_steps: 1
+  learning_rate: 0.0003
+  weight_decay: 0.01
+  max_steps: 5
+  log_every: 1
+  eval_every: 5
+  save_every: 5

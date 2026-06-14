@@ -1,5 +1,7 @@
 name: paper_en
 dedup: source_text
+target_hours:
+  en: 31000
 
 datasets:
   - id: librispeech
@@ -17,7 +19,6 @@ datasets:
         - "(?i)(XL|GigaSpeech\\.json|metadata)"
       dedup_key: hf:speechcolab/gigaspeech:xl
   - id: commonvoice-en
-    enabled: false
     lang: en
     provider: voxbox
     download:
@@ -25,10 +26,7 @@ datasets:
       hf_include:
         - "(?i)(commonvoice|common_voice|cv).*(en|english)"
       dedup_key: voxbox:commonvoice:en
-      fallback:
-        source_dataset: commonvoice-en
   - id: emilia-en
-    enabled: false
     lang: en
     provider: voxbox
     download:
@@ -36,5 +34,3 @@ datasets:
       hf_include:
         - "(?i)(emilia).*(en|english)"
       dedup_key: voxbox:emilia:en
-      fallback:
-        source_dataset: emilia-en

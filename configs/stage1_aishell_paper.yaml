@@ -1,0 +1,35 @@
+seed: 1337
+device: cuda
+output_dir: ${OUTPUT_ROOT}/stage1_aishell
+
+audio:
+  target_sample_rate: 16000
+
+tokenizer:
+  backend: glm4voice
+  model_path: ${MODEL_ROOT}/glm-4-voice-tokenizer
+  code_path: ${MODEL_ROOT}/GLM-4-Voice
+  vocab_size: 16384
+  dtype: bfloat16
+
+model:
+  backend: qwen
+  model_name_or_path: ${MODEL_ROOT}/Qwen3-0.6B
+
+data:
+  train_manifest: manifests/stage1_aishell/train.jsonl
+  dev_manifest: manifests/stage1_aishell/dev.jsonl
+  max_audio_tokens: 4096
+  max_text_tokens: 512
+
+training:
+  batch_size: 1
+  eval_batch_size: 1
+  gradient_accumulation_steps: 16
+  learning_rate: 0.00002
+  weight_decay: 0.01
+  max_steps: 100000
+  log_every: 10
+  eval_every: 1000
+  save_every: 5000
+  max_new_tokens: 256

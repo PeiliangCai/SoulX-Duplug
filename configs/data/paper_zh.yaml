@@ -1,5 +1,7 @@
 name: paper_zh
 dedup: source_text
+target_hours:
+  zh: 47000
 
 datasets:
   - id: aishell1
@@ -26,7 +28,6 @@ datasets:
       files: all
       dedup_key: openslr:slr68:magicdata
   - id: commonvoice-cn
-    enabled: false
     lang: zh
     provider: voxbox
     download:
@@ -34,10 +35,7 @@ datasets:
       hf_include:
         - "(?i)(commonvoice|common_voice|cv).*(zh|cn|chinese|mandarin)"
       dedup_key: voxbox:commonvoice:zh
-      fallback:
-        source_dataset: commonvoice-cn
   - id: emilia-cn
-    enabled: false
     lang: zh
     provider: voxbox
     download:
@@ -45,5 +43,3 @@ datasets:
       hf_include:
         - "(?i)(emilia).*(zh|cn|chinese|mandarin)"
       dedup_key: voxbox:emilia:zh
-      fallback:
-        source_dataset: emilia-cn

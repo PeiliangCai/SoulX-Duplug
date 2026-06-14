@@ -1,0 +1,37 @@
+seed: 1337
+device: cpu
+output_dir: outputs/stage1_aishell_smoke
+
+audio:
+  target_sample_rate: 16000
+
+tokenizer:
+  backend: dummy
+  vocab_size: 256
+  token_rate_hz: 12.5
+
+model:
+  backend: dummy
+  hidden_size: 128
+  model_name_or_path: Qwen/Qwen3-0.6B
+
+data:
+  train_manifest: manifests/stage1/train.normalized.jsonl
+  dev_manifest: manifests/stage1/dev.normalized.jsonl
+  limit_train_samples: 256
+  limit_dev_samples: 32
+  max_audio_tokens: 1024
+  max_text_tokens: 256
+
+training:
+  batch_size: 4
+  eval_batch_size: 4
+  gradient_accumulation_steps: 1
+  learning_rate: 0.0003
+  weight_decay: 0.01
+  max_steps: 10
+  log_every: 1
+  eval_every: 5
+  save_every: 10
+  max_new_tokens: 128
+

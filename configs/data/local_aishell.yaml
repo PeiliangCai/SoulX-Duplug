@@ -1,0 +1,16 @@
+name: local_aishell
+dedup: source_text
+
+datasets:
+  - id: aishell1
+    lang: zh
+    download:
+      source_dataset: aishell1
+      files: all
+      dedup_key: openslr:slr33:aishell1
+  - id: aishell3
+    lang: zh
+    download:
+      source_dataset: aishell3
+      files: all
+      dedup_key: openslr:slr93:aishell3

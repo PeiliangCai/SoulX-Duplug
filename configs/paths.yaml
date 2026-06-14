@@ -1,0 +1,5 @@
+data_root: ${DATA_ROOT}
+model_root: ${MODEL_ROOT}
+cache_root: ${CACHE_ROOT}
+output_root: ${OUTPUT_ROOT}
+
