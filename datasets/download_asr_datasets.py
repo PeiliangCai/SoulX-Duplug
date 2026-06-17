@@ -253,18 +253,33 @@ def configure_log_file(path: Path | None) -> None:
         f.write(f"\n[{timestamp()}] [log] start download_asr_datasets.py\n")
 
 
-def timestamp() -> str:
-    return _dt.datetime.now(_dt.timezone.utc).astimezone().isoformat(timespec="seconds")
+def _same_path(left: str | Path | None, right: str | Path | None) -> bool:
+    if left is None or right is None:
+        return False
+    try:
+        return Path(left).expanduser().resolve() == Path(right).expanduser().resolve()
+    except OSError:
+        return False
 
 
-def log(message: str) -> None:
-    print(message, file=sys.stderr, flush=True)
+def _write_log_file_line(message: str) -> None:
     if LOG_FILE is None:
         return
     with LOG_FILE.open("a", encoding="utf-8") as f:
         lines = str(message).splitlines() or [""]
         for line in lines:
             f.write(f"[{timestamp()}] {line}\n")
+
+
+def timestamp() -> str:
+    return _dt.datetime.now(_dt.timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
+def log(message: str) -> None:
+    print(message, file=sys.stderr, flush=True)
+    if LOG_FILE is None or _same_path(LOG_FILE, os.environ.get("SOULX_TEE_LOG_FILE")):
+        return
+    _write_log_file_line(message)
 
 
 def tool_path(name: str) -> str | None:
@@ -410,14 +425,24 @@ class Progress:
         self.current = start
         self.started_at = time.monotonic()
         self.last_print = 0.0
+        self.last_log = 0.0
 
     def update(self, downloaded: int, force: bool = False) -> None:
         self.current = downloaded
         now = time.monotonic()
+        if force or now - self.last_log >= 60.0:
+            self.last_log = now
+            log(f"[progress] {self.status_text(now)}")
         if not force and now - self.last_print < 0.5:
             return
         self.last_print = now
 
+        message = "\r" + self.status_text(now)
+        print(message, end="", file=sys.stderr, flush=True)
+
+    def status_text(self, now: float | None = None) -> str:
+        if now is None:
+            now = time.monotonic()
         elapsed = max(now - self.started_at, 1e-6)
         delta = max(self.current - self.start, 0)
         speed = delta / elapsed
@@ -426,14 +451,11 @@ class Progress:
             percent = min(self.current / self.total * 100, 100.0)
             remaining = max(self.total - self.current, 0)
             eta = remaining / speed if speed > 0 else None
-            message = (
-                f"\r{self.label}: {format_size(self.current)}/{format_size(self.total)} "
+            return (
+                f"{self.label}: {format_size(self.current)}/{format_size(self.total)} "
                 f"({percent:6.2f}%) {format_size(speed)}/s ETA {format_seconds(eta)}"
             )
-        else:
-            message = f"\r{self.label}: {format_size(self.current)} {format_size(speed)}/s"
-
-        print(message, end="", file=sys.stderr, flush=True)
+        return f"{self.label}: {format_size(self.current)} {format_size(speed)}/s"
 
     def finish(self) -> None:
         self.update(self.current, force=True)
@@ -853,7 +875,7 @@ def finalize_part(
     if size <= 0:
         raise DownloadError(f"downloaded file is empty: {file_spec.filename}")
     os.replace(part_path, final_path)
-    log(f"[done] {final_path} ({format_size(size)})")
+    log(f"[file_done] {file_spec.filename} -> {final_path.expanduser().resolve()} ({format_size(size)})")
 
 
 def download_file(
@@ -871,6 +893,10 @@ def download_file(
     final_path = dataset_dir / file_spec.filename
     part_path = Path(f"{final_path}.part")
     final_path.parent.mkdir(parents=True, exist_ok=True)
+    log(
+        f"[file_start] {file_spec.filename} -> {final_path.expanduser().resolve()}；"
+        f"expected_size={format_size(file_spec.size_bytes)}"
+    )
 
     if validate_existing(final_path, file_spec, force, state_entry):
         return final_path
@@ -938,6 +964,10 @@ def download_file_aria2(
     final_path = dataset_dir / file_spec.filename
     part_path = Path(f"{final_path}.part")
     final_path.parent.mkdir(parents=True, exist_ok=True)
+    log(
+        f"[file_start] {file_spec.filename} -> {final_path.expanduser().resolve()}；"
+        f"expected_size={format_size(file_spec.size_bytes)}"
+    )
 
     if validate_existing(final_path, file_spec, force, state_entry):
         return final_path
@@ -1136,7 +1166,7 @@ def extract_archive(archive_path: Path, extract_dir: Path, delete_archive: bool)
         _dt.datetime.now(_dt.timezone.utc).isoformat() + "\n",
         encoding="utf-8",
     )
-    log(f"[done] extracted {archive_path.name}")
+    log(f"[extract_done] {archive_path.name} -> {extract_dir.expanduser().resolve()}")
     if delete_archive:
         remove_archive_after_extract(archive_path)
 
@@ -1312,6 +1342,10 @@ def download_hf_files_with_cli(
     for file_spec in files:
         final_path = dataset_dir / file_spec.filename
         final_path.parent.mkdir(parents=True, exist_ok=True)
+        log(
+            f"[file_start] {file_spec.filename} -> {final_path.expanduser().resolve()}；"
+            f"expected_size={format_size(file_spec.size_bytes)}"
+        )
         state_entry = state_entry_for(state, file_spec.key)
         if can_skip_download_for_extracted_archive(dataset_dir, file_spec, args, state_entry):
             downloaded.append(final_path)
@@ -1393,7 +1427,7 @@ def download_hf_files_with_cli(
             write_state_entry(state, file_spec, final_path)
             save_state(dataset_dir, dataset, state)
             downloaded.append(final_path)
-            log(f"[done] {final_path} ({format_size(size)})")
+            log(f"[file_done] {file_spec.filename} -> {final_path.expanduser().resolve()} ({format_size(size)})")
 
     return downloaded
 
@@ -1408,10 +1442,19 @@ def download_http_dataset(
     if args.dry_run:
         describe_http_plan(dataset, files, dataset_dir, args)
         return []
+    log(
+        f"[dataset_start] {dataset.key} ({dataset.name})；kind=http；"
+        f"target={dataset_dir.expanduser().resolve()}；files={len(files)}"
+    )
 
     state = load_state(dataset_dir)
     downloaded: list[Path] = []
     for file_spec in files:
+        log(
+            f"[file_plan] {dataset.key}/{file_spec.key} -> "
+            f"{(dataset_dir / file_spec.filename).expanduser().resolve()}；"
+            f"expected_size={format_size(file_spec.size_bytes)}"
+        )
         state_entry = state_entry_for(state, file_spec.key)
         if can_skip_download_for_extracted_archive(dataset_dir, file_spec, args, state_entry):
             downloaded.append(dataset_dir / file_spec.filename)
@@ -1426,6 +1469,10 @@ def download_http_dataset(
         write_state_entry(state, file_spec, final_path)
         save_state(dataset_dir, dataset, state)
         downloaded.append(final_path)
+    log(
+        f"[dataset_files_done] {dataset.key}；"
+        f"target={dataset_dir.expanduser().resolve()}；files={len(downloaded)}"
+    )
     return downloaded
 
 
@@ -1444,6 +1491,10 @@ def download_hf_dataset(
     turbo.load_for_hf_if_auto()
     headers = auth_headers(args.hf_token)
     files = list_hf_files(dataset, args, headers)
+    log(
+        f"[dataset_start] {dataset.key} ({dataset.name})；kind=hf；"
+        f"target={dataset_dir.expanduser().resolve()}；selected_files={len(files)}"
+    )
     log(f"[hf] selected {len(files)} file(s)")
 
     state = load_state(dataset_dir)
@@ -1474,11 +1525,21 @@ def download_hf_dataset(
         write_state_entry(state, file_spec, final_path)
         save_state(dataset_dir, dataset, state)
         downloaded.append(final_path)
+    log(
+        f"[dataset_files_done] {dataset.key}；"
+        f"target={dataset_dir.expanduser().resolve()}；files={len(downloaded)}"
+    )
     return downloaded
 
 
 def maybe_extract(paths: Iterable[Path], dataset_dir: Path, keep_archives: bool) -> None:
     extract_dir = dataset_dir / "extracted"
+    paths = list(paths)
+    if paths:
+        log(
+            f"[extract_start] target={extract_dir.expanduser().resolve()}；"
+            f"archives={len(paths)}；keep_archives={keep_archives}"
+        )
     for path in paths:
         extract_archive(path, extract_dir, delete_archive=not keep_archives)
 
@@ -1492,7 +1553,7 @@ def log_dataset_success(
 ) -> None:
     status = "下载并解压完成" if extracted else "下载完成"
     log(
-        f"[success] 数据集 {dataset.key} {status}；"
+        f"[dataset_success] 数据集 {dataset.key} {status}；"
         f"存放位置：{dataset_dir.expanduser().resolve()}；"
         f"文件数：{len(downloaded)}"
     )
@@ -1500,6 +1561,10 @@ def log_dataset_success(
 
 def run_dataset_download(dataset: DatasetSpec, dataset_dir: Path, args: argparse.Namespace, turbo: TurboLoader) -> list[Path]:
     if dataset.kind == "manual":
+        log(
+            f"[dataset_manual] {dataset.key} ({dataset.name})；"
+            f"target={dataset_dir.expanduser().resolve()}；message={dataset.manual_message}"
+        )
         describe_manual(dataset, dataset_dir)
         return []
     if dataset.kind == "http":
@@ -1523,10 +1588,16 @@ def run_profile(args: argparse.Namespace, turbo: TurboLoader) -> int:
         log(f"[plan] wrote {args.plan_out}")
 
     if args.dry_run:
+        log(f"[dry_run] profile={args.profile}；physical_tasks={len(tasks)}")
         print(f"Profile: {args.profile}")
         print(f"Physical download tasks: {len(tasks)}")
         print()
         for item in plan_items:
+            log(
+                f"[dry_run_task] source_dataset={item['source_dataset']}；"
+                f"kind={item['source_kind']}；target={item['target_dir']}；"
+                f"logical_ids={','.join(item['logical_ids'])}"
+            )
             print(f"- source_dataset: {item['source_dataset']} [{item['source_kind']}]")
             print(f"  logical_ids: {', '.join(item['logical_ids'])}")
             print(f"  dedup_key: {item['dedup_key']}")
@@ -1547,7 +1618,7 @@ def run_profile(args: argparse.Namespace, turbo: TurboLoader) -> int:
         dataset_dir = task_args.out_dir.expanduser().resolve() / dataset.key
         log(
             f"[profile] {task.logical_id} -> {task.source_dataset} "
-            f"(dedup_key={task.dedup_key})"
+            f"(dedup_key={task.dedup_key})；target={dataset_dir}"
         )
         downloaded = run_dataset_download(dataset, dataset_dir, task_args, turbo)
         if task_args.extract and downloaded:
@@ -1580,7 +1651,12 @@ def main() -> int:
 
         dataset = DATASETS[args.dataset]
         dataset_dir = args.out_dir.expanduser().resolve() / dataset.key
+        log(f"[single] dataset={dataset.key}；target={dataset_dir}")
         if dataset.kind == "manual":
+            log(
+                f"[dataset_manual] {dataset.key} ({dataset.name})；"
+                f"target={dataset_dir.expanduser().resolve()}；message={dataset.manual_message}"
+            )
             describe_manual(dataset, dataset_dir)
             return 0 if args.dry_run else 2
         downloaded = run_dataset_download(dataset, dataset_dir, args, turbo)

@@ -2,22 +2,38 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 ENV_DIR="${ENV_DIR:-$SCRIPT_DIR/.dataset-download-env}"
 PROFILE="${PROFILE:-$SCRIPT_DIR/../configs/data/paper_all.yaml}"
 OUT_DIR="${OUT_DIR:-$SCRIPT_DIR}"
 LOG_FILE="${LOG_FILE:-$SCRIPT_DIR/download.log}"
-CLEANUP_ENV=0
+DELETE_ENV_AFTER="${DELETE_ENV_AFTER:-0}"
+USING_DOWNLOAD_ENV=0
 
 mkdir -p "$(dirname "$LOG_FILE")"
 exec > >(tee -a "$LOG_FILE") 2>&1
+
+safe_remove_env_dir() {
+  local target
+  target="$(cd "$(dirname "$ENV_DIR")" && pwd)/$(basename "$ENV_DIR")"
+  case "$target" in
+    "/"|"$HOME"|"$SCRIPT_DIR"|"$PROJECT_DIR"|"$SCRIPT_DIR/..")
+      echo "[error] refusing to remove unsafe ENV_DIR: $target" >&2
+      return 1
+      ;;
+  esac
+  rm -rf "$target"
+}
 
 cleanup() {
   local exit_code=$?
   trap - EXIT
   set +e
-  if [[ "$CLEANUP_ENV" == "1" ]]; then
+  if [[ "$USING_DOWNLOAD_ENV" == "1" ]]; then
     conda deactivate >/dev/null 2>&1 || true
-    conda env remove -p "$ENV_DIR" -y || rm -rf "$ENV_DIR"
+  fi
+  if [[ "$DELETE_ENV_AFTER" == "1" && -d "$ENV_DIR" ]]; then
+    conda env remove -p "$ENV_DIR" -y || safe_remove_env_dir
   fi
   if [[ "$exit_code" -eq 0 ]]; then
     echo "[success] 全部数据集下载流程完成"
@@ -32,6 +48,8 @@ trap cleanup EXIT
 
 echo "[log] 日志文件：$LOG_FILE"
 echo "[start] $(date '+%Y-%m-%d %H:%M:%S')"
+echo "[env] ENV_DIR=$ENV_DIR DELETE_ENV_AFTER=$DELETE_ENV_AFTER"
+export SOULX_TEE_LOG_FILE="$LOG_FILE"
 
 if [[ -z "${HF_TOKEN:-}" || "${HF_TOKEN}" == "hf_xxx" ]]; then
   echo "请先设置 HF_TOKEN：export HF_TOKEN=hf_xxx"
@@ -60,22 +78,37 @@ fi
 
 eval "$(conda shell.bash hook)"
 
-if [[ -d "$ENV_DIR" ]]; then
-  conda env remove -p "$ENV_DIR" -y || rm -rf "$ENV_DIR"
+if [[ -d "$ENV_DIR/conda-meta" ]]; then
+  echo "[env] 复用已有下载环境：$ENV_DIR"
+else
+  if [[ -e "$ENV_DIR" ]]; then
+    echo "[env] 发现无效下载环境，重建：$ENV_DIR"
+    safe_remove_env_dir
+  fi
+  echo "[env] 创建下载环境：$ENV_DIR"
+  conda create -p "$ENV_DIR" python=3.10 -y
 fi
 
-conda create -p "$ENV_DIR" python=3.10 -y
-CLEANUP_ENV=1
 conda activate "$ENV_DIR"
-pip install PyYAML huggingface_hub
+USING_DOWNLOAD_ENV=1
+
+if python -c "import yaml, huggingface_hub" >/dev/null 2>&1; then
+  echo "[env] 依赖已存在：PyYAML huggingface_hub"
+else
+  echo "[env] 安装下载依赖：PyYAML huggingface_hub"
+  pip install PyYAML huggingface_hub
+fi
+
 hf auth login --token "$HF_TOKEN"
 
 python3 "$SCRIPT_DIR/download_asr_datasets.py" \
   --profile "$PROFILE" \
   --out-dir "$OUT_DIR" \
+  --log-file "$LOG_FILE" \
   --dry-run
 
 python3 "$SCRIPT_DIR/download_asr_datasets.py" \
   --profile "$PROFILE" \
   --out-dir "$OUT_DIR" \
+  --log-file "$LOG_FILE" \
   --extract
