@@ -39,6 +39,7 @@ from soulx_duplug.metrics import cer, wer
 from soulx_duplug.models.speech_tokenizer import SpeechTokenizerBackend, build_speech_tokenizer
 from soulx_duplug.models.stage1_model import Stage1Batch, build_stage1_model
 from soulx_duplug.models.text_tokenizer import CharTokenizer, HfTextTokenizer, TextTokenizer
+from soulx_duplug.training_curves import TrainingCurveTracker
 
 
 @dataclass
@@ -150,6 +151,16 @@ def move_batch(batch: Stage1Batch, device: torch.device) -> Stage1Batch:
     )
 
 
+def select_batch(batch: Stage1Batch, indices: list[int]) -> Stage1Batch:
+    rows = torch.tensor(indices, dtype=torch.long, device=batch.audio_tokens.device)
+    return Stage1Batch(
+        audio_tokens=batch.audio_tokens.index_select(0, rows),
+        audio_lengths=batch.audio_lengths.index_select(0, rows),
+        decoder_input_ids=batch.decoder_input_ids.index_select(0, rows),
+        labels=batch.labels.index_select(0, rows),
+    )
+
+
 def make_eval_loader(dataset: Stage1AsrDataset, *, batch_size: int, pad_id: int) -> DataLoader:
     def collate_with_refs(samples: list[PreparedSample]) -> tuple[Stage1Batch, list[str], list[str]]:
         return collate_stage1(samples, pad_id), [sample.text for sample in samples], [sample.lang for sample in samples]
@@ -165,11 +176,18 @@ def evaluate_loader(
     *,
     device: torch.device,
     max_new_tokens: int,
+    max_decode_samples_per_language: int | None = None,
+    logger: Any | None = None,
+    step: int | None = None,
+    log_examples: int = 3,
 ) -> dict[str, float]:
     model.eval()
     losses: list[float] = []
     zh_scores: list[float] = []
     en_scores: list[float] = []
+    decoded_by_language = {"zh": 0, "en": 0}
+    eos_terminated = 0
+    examples_logged = 0
     for batch, refs, langs in dataloader:
         batch = move_batch(batch, device)
         output = model(
@@ -180,20 +198,46 @@ def evaluate_loader(
         )
         if "loss" in output:
             losses.append(float(output["loss"].detach().cpu()))
-        if hasattr(model, "generate"):
-            generated = model.generate(
-                audio_tokens=batch.audio_tokens,
-                audio_lengths=batch.audio_lengths,
-                bos_id=tokenizer.bos_id,
-                eos_id=tokenizer.eos_id,
-                max_new_tokens=max_new_tokens,
-            )
-            for ids, ref, lang in zip(generated.cpu().tolist(), refs, langs):
-                hyp = tokenizer.decode(ids)
-                if lang == "en":
-                    en_scores.append(wer(ref, hyp))
-                else:
-                    zh_scores.append(cer(ref, hyp))
+        decode_indices = []
+        for index, lang in enumerate(langs):
+            language = "en" if lang == "en" else "zh"
+            if (
+                max_decode_samples_per_language is None
+                or decoded_by_language[language] < max_decode_samples_per_language
+            ):
+                decode_indices.append(index)
+                decoded_by_language[language] += 1
+        if not decode_indices:
+            continue
+        decode_batch = select_batch(batch, decode_indices)
+        generated = model.generate(
+            audio_tokens=decode_batch.audio_tokens,
+            audio_lengths=decode_batch.audio_lengths,
+            bos_id=tokenizer.bos_id,
+            eos_id=tokenizer.eos_id,
+            max_new_tokens=max_new_tokens,
+        )
+        selected_refs = [refs[index] for index in decode_indices]
+        selected_langs = [langs[index] for index in decode_indices]
+        for ids, ref, lang in zip(generated.cpu().tolist(), selected_refs, selected_langs):
+            eos_terminated += int(tokenizer.eos_id in ids[1:])
+            hyp = tokenizer.decode(ids)
+            if logger is not None and examples_logged < log_examples:
+                log_event(
+                    logger,
+                    "eval_prediction",
+                    stage="stage1",
+                    step=step,
+                    lang=lang,
+                    reference=ref,
+                    hypothesis=hyp,
+                    ended_with_eos=tokenizer.eos_id in ids[1:],
+                )
+                examples_logged += 1
+            if lang == "en":
+                en_scores.append(wer(ref, hyp))
+            else:
+                zh_scores.append(cer(ref, hyp))
     metrics: dict[str, float] = {}
     if losses:
         metrics["loss"] = sum(losses) / len(losses)
@@ -201,6 +245,12 @@ def evaluate_loader(
         metrics["cer_zh"] = sum(zh_scores) / len(zh_scores)
     if en_scores:
         metrics["wer_en"] = sum(en_scores) / len(en_scores)
+    decoded_samples = len(zh_scores) + len(en_scores)
+    if decoded_samples:
+        metrics["decode_eos_rate"] = eos_terminated / decoded_samples
+        metrics["decoded_samples"] = float(decoded_samples)
+        metrics["decoded_zh_samples"] = float(len(zh_scores))
+        metrics["decoded_en_samples"] = float(len(en_scores))
     return metrics
 
 
@@ -362,6 +412,22 @@ def train(config: dict[str, Any], log_file: str | Path | None = None) -> Path:
         eval_every = int(train_cfg.get("eval_every", 100))
         save_every = int(train_cfg.get("save_every", 500))
         max_new_tokens = int(train_cfg.get("max_new_tokens", 128))
+        eval_decode_samples_per_language_value = train_cfg.get("eval_decode_samples_per_language")
+        eval_decode_samples_per_language = (
+            int(eval_decode_samples_per_language_value)
+            if eval_decode_samples_per_language_value is not None
+            else None
+        )
+        eval_log_examples = max(0, int(train_cfg.get("eval_log_examples", 3)))
+        plot_every = max(0, int(train_cfg.get("plot_every", 100)))
+        plot_smoothing_window = max(1, int(train_cfg.get("plot_smoothing_window", 20)))
+        curve_tracker = TrainingCurveTracker(
+            output_dir=output_dir,
+            stage="stage1",
+            logger=logger,
+            plot_every=plot_every,
+            smoothing_window=plot_smoothing_window,
+        ) if context.is_main else None
         log_event(
             logger,
             "training_ready",
@@ -377,6 +443,10 @@ def train(config: dict[str, Any], log_file: str | Path | None = None) -> Path:
             eval_every=eval_every,
             save_every=save_every,
             max_new_tokens=max_new_tokens,
+            eval_decode_samples_per_language=eval_decode_samples_per_language,
+            eval_log_examples=eval_log_examples,
+            plot_every=plot_every,
+            plot_smoothing_window=plot_smoothing_window,
         )
 
         step = 0
@@ -407,6 +477,8 @@ def train(config: dict[str, Any], log_file: str | Path | None = None) -> Path:
                     train_loss = reduce_mean(raw_loss, context)
                     if context.is_main:
                         log_event(logger, "train_step", step=step, train_loss=train_loss, **cuda_memory_summary(device))
+                        if curve_tracker is not None:
+                            curve_tracker.record_train(step=step, train_loss=train_loss)
                 if dev_dataset and step % eval_every == 0:
                     barrier(context)
                     if context.is_main and dev_loader is not None:
@@ -416,9 +488,18 @@ def train(config: dict[str, Any], log_file: str | Path | None = None) -> Path:
                             text_tokenizer,
                             device=device,
                             max_new_tokens=max_new_tokens,
+                            max_decode_samples_per_language=eval_decode_samples_per_language,
+                            logger=logger,
+                            step=step,
+                            log_examples=eval_log_examples,
                         )
                         log_event(logger, "eval", step=step, **metrics, **cuda_memory_summary(device))
+                        if curve_tracker is not None:
+                            curve_tracker.record_eval(step=step, metrics=metrics)
+                            curve_tracker.plot(step=step, reason="eval")
                     barrier(context)
+                elif context.is_main and curve_tracker is not None and curve_tracker.should_plot(step):
+                    curve_tracker.plot(step=step, reason="periodic")
                 if step % save_every == 0:
                     if context.is_main:
                         last_checkpoint = save_checkpoint(
@@ -451,6 +532,8 @@ def train(config: dict[str, Any], log_file: str | Path | None = None) -> Path:
                 log_event(logger, "checkpoint_saved", step=step, checkpoint=str(last_checkpoint))
             else:
                 log_event(logger, "checkpoint_already_saved", step=step, checkpoint=str(last_checkpoint))
+            if curve_tracker is not None:
+                curve_tracker.plot(step=step, reason="train_complete")
             log_event(logger, "train_complete", stage="stage1", step=step, checkpoint=str(last_checkpoint), **cuda_memory_summary(device))
         barrier(context)
         return final_checkpoint

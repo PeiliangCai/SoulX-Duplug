@@ -47,6 +47,7 @@ def evaluate_checkpoint(checkpoint: Path, manifest: Path, *, limit: int | None =
     zh_scores: list[float] = []
     en_scores: list[float] = []
     losses: list[float] = []
+    eos_terminated = 0
     with torch.no_grad():
         for batch, samples in loader:
             batch = move_batch(batch, device)
@@ -66,6 +67,7 @@ def evaluate_checkpoint(checkpoint: Path, manifest: Path, *, limit: int | None =
                 max_new_tokens=int(config.get("training", {}).get("max_new_tokens", 128)),
             )
             for ids, sample in zip(generated.cpu().tolist(), samples):
+                eos_terminated += int(tokenizer.eos_id in ids[1:])
                 hyp = tokenizer.decode(ids)
                 if sample.lang == "en":
                     en_scores.append(wer(sample.text, hyp))
@@ -78,6 +80,10 @@ def evaluate_checkpoint(checkpoint: Path, manifest: Path, *, limit: int | None =
         metrics["cer_zh"] = sum(zh_scores) / len(zh_scores)
     if en_scores:
         metrics["wer_en"] = sum(en_scores) / len(en_scores)
+    decoded_samples = len(zh_scores) + len(en_scores)
+    if decoded_samples:
+        metrics["decode_eos_rate"] = eos_terminated / decoded_samples
+        metrics["decoded_samples"] = float(decoded_samples)
     return metrics
 
 

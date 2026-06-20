@@ -33,5 +33,10 @@ training:
   weight_decay: 0.01
   max_steps: 100000
   log_every: 10
+  plot_every: 100
+  plot_smoothing_window: 20
   eval_every: 1000
   save_every: 5000
+  max_new_tokens_per_chunk: 16
+  eval_decode_samples_per_language: 25
+  eval_log_examples: 3

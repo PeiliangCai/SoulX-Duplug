@@ -69,12 +69,11 @@ class DummyStage1AsrModel(nn.Module):
         batch_size = audio_tokens.shape[0]
         generated = torch.full((batch_size, 1), bos_id, dtype=torch.long, device=audio_tokens.device)
         for _ in range(max_new_tokens):
-            labels = torch.full_like(generated, -100)
             logits = self(
                 audio_tokens=audio_tokens,
                 audio_lengths=audio_lengths,
                 decoder_input_ids=generated,
-                labels=labels,
+                labels=None,
             )["logits"]
             next_token = logits[:, -1].argmax(dim=-1, keepdim=True)
             generated = torch.cat([generated, next_token], dim=1)
@@ -137,6 +136,77 @@ class QwenStage1AsrModel(nn.Module):
                 ignore_index=-100,
             )
         return result
+
+    @torch.no_grad()
+    def generate(
+        self,
+        *,
+        audio_tokens: torch.LongTensor,
+        audio_lengths: torch.LongTensor,
+        bos_id: int,
+        eos_id: int,
+        max_new_tokens: int,
+    ) -> torch.LongTensor:
+        self.eval()
+        batch_size, max_audio_tokens = audio_tokens.shape
+        device = audio_tokens.device
+        audio_embeds = self.projector(self.audio_embedding(audio_tokens))
+        bos_tokens = torch.full((batch_size, 1), bos_id, dtype=torch.long, device=device)
+        bos_embeds = self.llm.get_input_embeddings()(bos_tokens)
+        inputs_embeds = torch.cat([audio_embeds, bos_embeds], dim=1)
+
+        audio_mask = (
+            torch.arange(max_audio_tokens, device=device)[None, :]
+            < audio_lengths[:, None]
+        ).long()
+        attention_mask = torch.cat(
+            [audio_mask, torch.ones((batch_size, 1), dtype=torch.long, device=device)],
+            dim=1,
+        )
+        position_ids = attention_mask.cumsum(dim=-1) - 1
+        position_ids.masked_fill_(attention_mask == 0, 0)
+        outputs = self.llm(
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            use_cache=True,
+        )
+        past_key_values = outputs.past_key_values
+        next_tokens = outputs.logits[:, -1].argmax(dim=-1)
+        generated = [bos_tokens]
+        finished = torch.zeros(batch_size, dtype=torch.bool, device=device)
+
+        for _ in range(max_new_tokens):
+            next_tokens = torch.where(
+                finished,
+                torch.full_like(next_tokens, eos_id),
+                next_tokens,
+            )
+            generated.append(next_tokens[:, None])
+            finished |= next_tokens.eq(eos_id)
+            if bool(finished.all()):
+                break
+
+            next_embeds = self.llm.get_input_embeddings()(next_tokens[:, None])
+            next_position_ids = attention_mask.sum(dim=-1, keepdim=True)
+            attention_mask = torch.cat(
+                [
+                    attention_mask,
+                    torch.ones((batch_size, 1), dtype=attention_mask.dtype, device=device),
+                ],
+                dim=1,
+            )
+            outputs = self.llm(
+                inputs_embeds=next_embeds,
+                attention_mask=attention_mask,
+                position_ids=next_position_ids,
+                past_key_values=past_key_values,
+                use_cache=True,
+            )
+            past_key_values = outputs.past_key_values
+            next_tokens = outputs.logits[:, -1].argmax(dim=-1)
+
+        return torch.cat(generated, dim=1)
 
 
 def build_stage1_model(config: dict, *, audio_vocab_size: int, text_vocab_size: int) -> nn.Module:

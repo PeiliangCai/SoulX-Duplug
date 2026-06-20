@@ -11,6 +11,8 @@
 - 语音 tokenizer：GLM-4-Voice tokenizer，训练时冻结。
 - 语言模型：Qwen3-0.6B。
 - Stage 2：160 ms chunk、960 ms look-back、40 ms look-ahead。
+- Stage 1：支持从音频前缀开始自回归生成完整转写。
+- Stage 2：按 chunk 自由生成 ASR token，直到 `<asr_eos>`。
 - 中文对齐：Paraformer。
 - 英文对齐：WhisperX。
 - 数据：论文列出的中英文 ASR 数据集混合训练。
@@ -294,9 +296,13 @@ data_paths         train/dev manifest 路径
 manifest_loaded    数据条数、小时数、语言和数据集统计
 tokenizers_ready   文本 tokenizer、语音 tokenizer、词表大小
 model_ready        模型类型、总参数量、可训练参数量、显存占用
+stage1_checkpoint_loaded Stage 2 已加载 Stage 1 权重及词表扩展信息
 training_ready     batch size、world_size、effective_batch_size、学习率、max_steps、eval/save 间隔
 train_step         当前 step 的 train_loss
 eval               dev loss、CER/WER
+eval_prediction    少量 reference/hypothesis 对照样例
+training_curves_updated 训练曲线已更新，包含图片和指标文件路径
+training_curves_failed  绘图失败；训练会继续运行
 checkpoint_saved   checkpoint 保存位置
 train_complete     训练正常结束
 train_failed       训练失败，后面会跟 traceback
@@ -307,6 +313,8 @@ train_failed       训练失败，后面会跟 traceback
 - `manifest_loaded`：确认训练数据不是 0，数据集和语言分布正确。
 - `train_step`：确认训练在前进，`train_loss` 有正常数值，不是 `nan`。
 - `eval`：看 dev loss、中文 `cer_zh`、英文 `wer_en`。
+- `eval_prediction`：直接检查模型生成文本是否逐步接近参考文本。
+- `training_curves_updated`：确认训练中的曲线图片已经更新。
 - `checkpoint_saved`：确认 checkpoint 路径已经保存。
 - `train_failed`：如果出现，直接看它后面的 `exception_type`、`message` 和 traceback。
 
@@ -320,6 +328,45 @@ grep '"event": "checkpoint_saved"' ${OUTPUT_ROOT}/stage1_paper_all/log.txt
 grep '"event": "eval"' ${OUTPUT_ROOT}/stage1_paper_all/log.txt
 ```
 
+训练期间会自动生成：
+
+```text
+${OUTPUT_ROOT}/stage1_paper_all/training_curves.png
+${OUTPUT_ROOT}/stage1_paper_all/training_metrics.jsonl
+${OUTPUT_ROOT}/stage2_paper_all/training_curves.png
+${OUTPUT_ROOT}/stage2_paper_all/training_metrics.jsonl
+```
+
+`training_curves.png` 默认每 100 steps 更新，并在每次验证和训练结束时更新。图中包含 train loss、滑动平均 train loss、dev loss，以及当前验证能够提供的 CER/WER。`training_metrics.jsonl` 按运行追加保存原始指标，每次运行由不同的 `run_id` 区分。
+
+Stage 1/2 的 CER/WER 均来自自由解码，不再使用真实文本前缀计算。Stage 1 从 BOS 开始生成到 EOS；Stage 2 对每个音频 chunk 生成文本到 `<asr_eos>`。`decode_eos_rate` 应逐步接近 1，Stage 2 的 `decode_truncated_chunk_rate` 应逐步接近 0；否则模型可能尚未学会正确结束生成。
+
+配置项：
+
+```yaml
+training:
+  plot_every: 100
+  plot_smoothing_window: 20
+  eval_decode_samples_per_language: 25
+  eval_log_examples: 3
+```
+
+训练期间的 dev loss 使用完整 dev 集；为控制自回归解码成本，CER/WER 默认每种语言取前 25 条 dev 样本。`plot_every: 0` 可关闭图片生成，原始指标仍会写入 JSONL。判断训练是否真实有效时，不能只看 train loss：train loss 持续下降说明模型能够拟合训练数据；dev loss、CER/WER 同时下降才说明验证集效果在改善。CER/WER 越低越好。
+
+训练结束后可独立评估 checkpoint。省略 `--limit` 时评估完整 manifest：
+
+```bash
+python -m soulx_duplug.eval.asr \
+  --checkpoint ${OUTPUT_ROOT}/stage1_paper_all/checkpoints/latest \
+  --manifest manifests/stage1_paper_all/dev.jsonl \
+  --limit 100
+
+python -m soulx_duplug.eval.streaming_asr \
+  --checkpoint ${OUTPUT_ROOT}/stage2_paper_all/checkpoints/latest \
+  --manifest manifests/stage2_paper_all/dev.jsonl \
+  --limit 100
+```
+
 ## 常用验证命令
 
 ```bash
@@ -328,6 +375,7 @@ python tests/test_text_manifest.py
 python tests/test_audio.py
 python tests/test_stage1_smoke.py
 python tests/test_stage2_smoke.py
+python tests/test_qwen_decoding.py
 ```
 
 ## 重要目录

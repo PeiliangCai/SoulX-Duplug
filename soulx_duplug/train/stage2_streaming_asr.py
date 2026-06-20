@@ -41,6 +41,7 @@ from soulx_duplug.models.speech_tokenizer import SpeechTokenizerBackend, build_s
 from soulx_duplug.models.streaming_asr_model import InterleavedBatch, build_interleaved_asr_model
 from soulx_duplug.models.text_tokenizer import CharTokenizer, TextTokenizer, load_text_tokenizer
 from soulx_duplug.train.stage1_asr import build_text_tokenizer
+from soulx_duplug.training_curves import TrainingCurveTracker
 
 
 @dataclass
@@ -107,30 +108,44 @@ class Stage2StreamingAsrDataset(Dataset[Stage2Sample]):
         text_inputs: list[int] = []
         modality: list[int] = []
         labels: list[int] = []
+        included_text: list[str] = []
         for chunk, chunk_audio_tokens in zip(record.chunks, audio_chunks):
-            for token_id in chunk_audio_tokens.tolist():
-                audio_ids.append(int(token_id))
+            chunk_audio_ids = [int(token_id) for token_id in chunk_audio_tokens.tolist()]
+            target = self.text_tokenizer.encode(chunk.text, add_special_tokens=False) + [self.asr_eos_id]
+            decoder_inputs = [self.text_tokenizer.bos_id] + target[:-1]
+            chunk_sequence_length = len(chunk_audio_ids) + len(decoder_inputs) + 1
+            if (
+                self.max_sequence_length is not None
+                and len(audio_ids) + chunk_sequence_length > self.max_sequence_length
+            ):
+                if audio_ids:
+                    break
+                raise RuntimeError(
+                    f"Stage 2 chunk exceeds max_sequence_length: "
+                    f"utt_id={record.utt_id} chunk={chunk.index} "
+                    f"length={chunk_sequence_length} limit={self.max_sequence_length}"
+                )
+            for token_id in chunk_audio_ids:
+                audio_ids.append(token_id)
                 text_inputs.append(self.text_tokenizer.pad_id)
                 modality.append(1)
                 labels.append(-100)
-            target = self.text_tokenizer.encode(chunk.text, add_special_tokens=False) + [self.asr_eos_id]
-            decoder_inputs = [self.text_tokenizer.bos_id] + target[:-1]
             for decoder_id, label_id in zip(decoder_inputs, target):
                 audio_ids.append(0)
                 text_inputs.append(int(decoder_id))
                 modality.append(0)
                 labels.append(int(label_id))
-        if self.max_sequence_length is not None:
-            audio_ids = audio_ids[: self.max_sequence_length]
-            text_inputs = text_inputs[: self.max_sequence_length]
-            modality = modality[: self.max_sequence_length]
-            labels = labels[: self.max_sequence_length]
+            audio_ids.append(0)
+            text_inputs.append(self.asr_eos_id)
+            modality.append(0)
+            labels.append(-100)
+            included_text.append(chunk.text)
         return Stage2Sample(
             audio_token_ids=torch.tensor(audio_ids, dtype=torch.long),
             text_input_ids=torch.tensor(text_inputs, dtype=torch.long),
             modality=torch.tensor(modality, dtype=torch.long),
             labels=torch.tensor(labels, dtype=torch.long),
-            text=record.text,
+            text="".join(included_text),
             lang=record.lang,
         )
 
@@ -169,6 +184,17 @@ def move_interleaved_batch(batch: InterleavedBatch, device: torch.device) -> Int
         modality=batch.modality.to(device),
         attention_mask=batch.attention_mask.to(device),
         labels=batch.labels.to(device),
+    )
+
+
+def select_interleaved_batch(batch: InterleavedBatch, indices: list[int]) -> InterleavedBatch:
+    rows = torch.tensor(indices, dtype=torch.long, device=batch.audio_token_ids.device)
+    return InterleavedBatch(
+        audio_token_ids=batch.audio_token_ids.index_select(0, rows),
+        text_input_ids=batch.text_input_ids.index_select(0, rows),
+        modality=batch.modality.index_select(0, rows),
+        attention_mask=batch.attention_mask.index_select(0, rows),
+        labels=batch.labels.index_select(0, rows),
     )
 
 
@@ -233,17 +259,52 @@ def load_stage1_weights_if_available(
             print(f"[warn] {message}")
         return
     state = torch.load(state_path, map_location=device)
-    missing, unexpected = model.load_state_dict(state.get("model", state), strict=False)
+    source_state = state.get("model", state)
+    target_state = model.state_dict()
+    compatible_state: dict[str, torch.Tensor] = {}
+    resized_keys: list[str] = []
+    skipped_keys: list[str] = []
+    unexpected_source_keys = 0
+    for key, source_value in source_state.items():
+        target_value = target_state.get(key)
+        if target_value is None:
+            unexpected_source_keys += 1
+            continue
+        if source_value.shape == target_value.shape:
+            compatible_state[key] = source_value
+            continue
+        if (
+            source_value.ndim == target_value.ndim
+            and source_value.shape[1:] == target_value.shape[1:]
+            and source_value.shape[0] < target_value.shape[0]
+        ):
+            resized_value = target_value.clone()
+            resized_value[: source_value.shape[0]].copy_(
+                source_value.to(device=resized_value.device, dtype=resized_value.dtype)
+            )
+            compatible_state[key] = resized_value
+            resized_keys.append(key)
+            continue
+        skipped_keys.append(
+            f"{key}:source={tuple(source_value.shape)} target={tuple(target_value.shape)}"
+        )
+    missing, unexpected = model.load_state_dict(compatible_state, strict=False)
     if logger is not None:
         log_event(
             logger,
             "stage1_checkpoint_loaded",
             checkpoint=str(state_path),
             missing=len(missing),
-            unexpected=len(unexpected),
+            unexpected=len(unexpected) + unexpected_source_keys,
+            resized_keys=resized_keys,
+            skipped_keys=skipped_keys,
         )
     else:
-        print(f"[init] loaded Stage 1 checkpoint; missing={len(missing)} unexpected={len(unexpected)}")
+        print(
+            f"[init] loaded Stage 1 checkpoint; missing={len(missing)} "
+            f"unexpected={len(unexpected) + unexpected_source_keys} "
+            f"resized={len(resized_keys)} skipped={len(skipped_keys)}"
+        )
 
 
 @torch.no_grad()
@@ -254,24 +315,64 @@ def evaluate_loader(
     *,
     device: torch.device,
     asr_eos_id: int,
+    max_new_tokens_per_chunk: int,
+    max_decode_samples_per_language: int | None = None,
+    logger: Any | None = None,
+    step: int | None = None,
+    log_examples: int = 3,
 ) -> dict[str, float]:
     model.eval()
     losses: list[float] = []
     zh_scores: list[float] = []
     en_scores: list[float] = []
+    decoded_by_language = {"zh": 0, "en": 0}
+    decoded_chunks = 0
+    eos_chunks = 0
+    truncated_chunks = 0
+    examples_logged = 0
     for batch, refs, langs in loader:
         batch = move_interleaved_batch(batch, device)
         output = model(batch)
         losses.append(float(output["loss"].detach().cpu()))
-        logits = output["logits"].argmax(dim=-1).detach().cpu()
-        labels = batch.labels.detach().cpu()
-        for pred_ids, label_ids, ref, lang in zip(logits.tolist(), labels.tolist(), refs, langs):
-            kept = [
-                pred
-                for pred, label in zip(pred_ids, label_ids)
-                if label != -100 and label != asr_eos_id
-            ]
-            hyp = tokenizer.decode(kept)
+        decode_indices = []
+        for index, lang in enumerate(langs):
+            language = "en" if lang == "en" else "zh"
+            if (
+                max_decode_samples_per_language is None
+                or decoded_by_language[language] < max_decode_samples_per_language
+            ):
+                decode_indices.append(index)
+                decoded_by_language[language] += 1
+        if not decode_indices:
+            continue
+        decode_batch = select_interleaved_batch(batch, decode_indices)
+        generations = model.generate_streaming(
+            decode_batch,
+            bos_id=tokenizer.bos_id,
+            asr_eos_id=asr_eos_id,
+            max_new_tokens_per_chunk=max_new_tokens_per_chunk,
+        )
+        selected_refs = [refs[index] for index in decode_indices]
+        selected_langs = [langs[index] for index in decode_indices]
+        for generation, ref, lang in zip(generations, selected_refs, selected_langs):
+            decoded_chunks += generation.chunk_count
+            eos_chunks += generation.eos_count
+            truncated_chunks += generation.truncated_chunk_count
+            hyp = tokenizer.decode(generation.token_ids)
+            if logger is not None and examples_logged < log_examples:
+                log_event(
+                    logger,
+                    "eval_prediction",
+                    stage="stage2",
+                    step=step,
+                    lang=lang,
+                    reference=ref,
+                    hypothesis=hyp,
+                    chunks=generation.chunk_count,
+                    eos_chunks=generation.eos_count,
+                    truncated_chunks=generation.truncated_chunk_count,
+                )
+                examples_logged += 1
             if lang == "en":
                 en_scores.append(wer(ref, hyp))
             else:
@@ -281,6 +382,14 @@ def evaluate_loader(
         metrics["cer_zh"] = sum(zh_scores) / len(zh_scores)
     if en_scores:
         metrics["wer_en"] = sum(en_scores) / len(en_scores)
+    decoded_samples = len(zh_scores) + len(en_scores)
+    if decoded_samples:
+        metrics["decoded_samples"] = float(decoded_samples)
+        metrics["decoded_zh_samples"] = float(len(zh_scores))
+        metrics["decoded_en_samples"] = float(len(en_scores))
+    if decoded_chunks:
+        metrics["decode_eos_rate"] = eos_chunks / decoded_chunks
+        metrics["decode_truncated_chunk_rate"] = truncated_chunks / decoded_chunks
     return metrics
 
 
@@ -445,6 +554,23 @@ def train(config: dict[str, Any], log_file: str | Path | None = None) -> Path:
         log_every = int(train_cfg.get("log_every", 10))
         eval_every = int(train_cfg.get("eval_every", 100))
         save_every = int(train_cfg.get("save_every", 500))
+        max_new_tokens_per_chunk = int(train_cfg.get("max_new_tokens_per_chunk", 16))
+        eval_decode_samples_per_language_value = train_cfg.get("eval_decode_samples_per_language")
+        eval_decode_samples_per_language = (
+            int(eval_decode_samples_per_language_value)
+            if eval_decode_samples_per_language_value is not None
+            else None
+        )
+        eval_log_examples = max(0, int(train_cfg.get("eval_log_examples", 3)))
+        plot_every = max(0, int(train_cfg.get("plot_every", 100)))
+        plot_smoothing_window = max(1, int(train_cfg.get("plot_smoothing_window", 20)))
+        curve_tracker = TrainingCurveTracker(
+            output_dir=run_output_dir,
+            stage="stage2",
+            logger=logger,
+            plot_every=plot_every,
+            smoothing_window=plot_smoothing_window,
+        ) if context.is_main else None
         log_event(
             logger,
             "training_ready",
@@ -459,6 +585,11 @@ def train(config: dict[str, Any], log_file: str | Path | None = None) -> Path:
             log_every=log_every,
             eval_every=eval_every,
             save_every=save_every,
+            max_new_tokens_per_chunk=max_new_tokens_per_chunk,
+            eval_decode_samples_per_language=eval_decode_samples_per_language,
+            eval_log_examples=eval_log_examples,
+            plot_every=plot_every,
+            plot_smoothing_window=plot_smoothing_window,
         )
 
         step = 0
@@ -484,6 +615,8 @@ def train(config: dict[str, Any], log_file: str | Path | None = None) -> Path:
                     train_loss = reduce_mean(raw_loss, context)
                     if context.is_main:
                         log_event(logger, "train_step", step=step, train_loss=train_loss, **cuda_memory_summary(device))
+                        if curve_tracker is not None:
+                            curve_tracker.record_train(step=step, train_loss=train_loss)
                 if dev_dataset and step % eval_every == 0:
                     barrier(context)
                     if context.is_main and dev_loader is not None:
@@ -493,9 +626,19 @@ def train(config: dict[str, Any], log_file: str | Path | None = None) -> Path:
                             text_tokenizer,
                             device=device,
                             asr_eos_id=asr_eos_id,
+                            max_new_tokens_per_chunk=max_new_tokens_per_chunk,
+                            max_decode_samples_per_language=eval_decode_samples_per_language,
+                            logger=logger,
+                            step=step,
+                            log_examples=eval_log_examples,
                         )
                         log_event(logger, "eval", step=step, **metrics, **cuda_memory_summary(device))
+                        if curve_tracker is not None:
+                            curve_tracker.record_eval(step=step, metrics=metrics)
+                            curve_tracker.plot(step=step, reason="eval")
                     barrier(context)
+                elif context.is_main and curve_tracker is not None and curve_tracker.should_plot(step):
+                    curve_tracker.plot(step=step, reason="periodic")
                 if step % save_every == 0:
                     if context.is_main:
                         last_checkpoint = save_checkpoint(
@@ -528,6 +671,8 @@ def train(config: dict[str, Any], log_file: str | Path | None = None) -> Path:
                 log_event(logger, "checkpoint_saved", step=step, checkpoint=str(last_checkpoint))
             else:
                 log_event(logger, "checkpoint_already_saved", step=step, checkpoint=str(last_checkpoint))
+            if curve_tracker is not None:
+                curve_tracker.plot(step=step, reason="train_complete")
             log_event(logger, "train_complete", stage="stage2", step=step, checkpoint=str(last_checkpoint), **cuda_memory_summary(device))
         barrier(context)
         return final_checkpoint
