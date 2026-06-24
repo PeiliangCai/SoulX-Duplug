@@ -32,6 +32,7 @@ NETWORK_TURBO = Path("/etc/network_turbo")
 STATE_FILE = ".download-state.json"
 USER_AGENT = "soulx-duplug-dataset-downloader/1.0"
 HF_ENDPOINT = "https://huggingface.co"
+WENETSPEECH_GIT_URL = "https://github.com/wenet-e2e/WenetSpeech.git"
 LOG_FILE: Path | None = None
 
 
@@ -56,6 +57,8 @@ class DatasetSpec:
     repo_id: str | None = None
     revision: str = "main"
     hf_prefixes: tuple[str, ...] = ()
+    hf_includes: tuple[str, ...] = ()
+    hf_excludes: tuple[str, ...] = ()
     requires_filter: bool = False
     requires_auth: bool = False
     manual_message: str = ""
@@ -196,44 +199,49 @@ DATASETS: dict[str, DatasetSpec] = {
         source="Hugging Face SparkAudio/voxbox",
         kind="hf",
         repo_id="SparkAudio/voxbox",
-        requires_auth=True,
         requires_filter=True,
         manual_message=(
-            "VoxBox is large and may be gated. Accept the Hugging Face terms first, "
-            "then pass --hf-prefix or --hf-include to select a subset."
+            "VoxBox is large. Pass --hf-prefix or --hf-include to select a subset, "
+            "for example audios/commonvoice_cn/."
         ),
     ),
     "wenetspeech": DatasetSpec(
         key="wenetspeech",
         name="WenetSpeech",
         source="OpenSLR SLR121 / https://wenet.org.cn/WenetSpeech/",
-        kind="manual",
+        kind="wenetspeech",
         manual_message=(
-            "WenetSpeech does not provide direct public archive links on OpenSLR. "
-            "OpenSLR points users to the WenetSpeech page and GitHub toolkit; fill "
-            "the form, obtain the password/instructions, then use the official toolkit."
+            "WenetSpeech requires the official download password. Apply on the "
+            "WenetSpeech website, then set WENETSPEECH_PASSWORD or "
+            "WENETSPEECH_PASSWORD_FILE before running this downloader."
         ),
     ),
     "commonvoice-cn": DatasetSpec(
         key="commonvoice-cn",
         name="Common Voice Chinese",
-        source="Mozilla Data Collective / Common Voice",
-        kind="manual",
+        source="Hugging Face SparkAudio/voxbox: commonvoice_cn",
+        kind="hf",
+        repo_id="SparkAudio/voxbox",
+        hf_prefixes=("audios/commonvoice_cn/", "metadata/"),
+        hf_includes=(r"(?i)(^audios/commonvoice_cn/|^metadata/commonvoice_cn\.jsonl$)",),
         manual_message=(
-            "Common Voice downloads are issued by Mozilla Data Collective and can "
-            "change by release. Download Chinese (China) from the Mozilla page after "
-            "reviewing the dataset terms, then place the archive under this directory."
+            "For this reproduction profile, Common Voice Chinese is downloaded from "
+            "the public VoxBox mirror. Official Mozilla releases now require Mozilla "
+            "Data Collective access."
         ),
     ),
     "commonvoice-en": DatasetSpec(
         key="commonvoice-en",
         name="Common Voice English",
-        source="Mozilla Data Collective / Common Voice",
-        kind="manual",
+        source="Hugging Face SparkAudio/voxbox: commonvoice_en",
+        kind="hf",
+        repo_id="SparkAudio/voxbox",
+        hf_prefixes=("audios/commonvoice_en/", "metadata/"),
+        hf_includes=(r"(?i)(^audios/commonvoice_en/|^metadata/commonvoice_en\.jsonl$)",),
         manual_message=(
-            "Common Voice downloads are issued by Mozilla Data Collective and can "
-            "change by release. Download English from the Mozilla page after reviewing "
-            "the dataset terms, then place the archive under this directory."
+            "For this reproduction profile, Common Voice English is downloaded from "
+            "the public VoxBox mirror. Official Mozilla releases now require Mozilla "
+            "Data Collective access."
         ),
     ),
 }
@@ -297,6 +305,17 @@ def detect_failure_reason(text: str, *, hf_context: bool = False) -> str:
     lowered = text.lower()
     if "no space left" in lowered or "disk quota" in lowered:
         return "磁盘空间不足，请清理目标盘或更换 --out-dir"
+    if "429" in lowered or "too many requests" in lowered or "rate limit" in lowered:
+        return "请求被限流，请降低并发、稍后重试，或使用已登录的 Hugging Face token"
+    if (
+        "503" in lowered
+        or "502" in lowered
+        or "504" in lowered
+        or "service unavailable" in lowered
+        or "bad gateway" in lowered
+        or "gateway timeout" in lowered
+    ):
+        return "远端服务或代理临时不可用，请重试；Hugging Face 下载建议启用 --turbo on"
     if "401" in lowered or "unauthorized" in lowered or "invalid token" in lowered:
         return "认证失败，请检查 HF_TOKEN 或 hf auth login 状态"
     if "403" in lowered or "forbidden" in lowered:
@@ -320,6 +339,8 @@ def detect_failure_reason(text: str, *, hf_context: bool = False) -> str:
         or "failed to establish" in lowered
     ):
         return "网络连接失败，请检查网络、代理或启用 --turbo on"
+    if "eof occurred in violation of protocol" in lowered:
+        return "TLS 连接被中途断开，通常是服务器网络、代理或 Hugging Face 连接不稳定；请重试或启用 --turbo on"
     if "certificate" in lowered or "ssl" in lowered or "tls" in lowered:
         return "TLS/证书校验失败，可能是镜像证书或代理问题"
     if "gated repo" in lowered or "gated dataset" in lowered or "restricted repo" in lowered:
@@ -570,6 +591,31 @@ def parse_args() -> argparse.Namespace:
         default=8,
         help="Maximum workers for hf download.",
     )
+    parser.add_argument(
+        "--wenetspeech-password-file",
+        type=Path,
+        help="File containing the WenetSpeech official download password. Defaults to WENETSPEECH_PASSWORD_FILE or WENETSPEECH_PASSWORD.",
+    )
+    parser.add_argument(
+        "--wenetspeech-toolkit-dir",
+        type=Path,
+        help="Existing or cloned WenetSpeech official toolkit directory.",
+    )
+    parser.add_argument(
+        "--keep-wenetspeech-toolkit",
+        action="store_true",
+        help="Keep the cloned WenetSpeech toolkit after download for debugging.",
+    )
+    parser.add_argument(
+        "--wenetspeech-download-dir",
+        type=Path,
+        help="Directory for encrypted WenetSpeech archives. Defaults to <target>/download.",
+    )
+    parser.add_argument(
+        "--wenetspeech-untar-dir",
+        type=Path,
+        help="Directory for extracted WenetSpeech data. Defaults to <target>/extracted.",
+    )
     parser.add_argument("--log-file", type=Path, help="Append download logs to this file.")
     return parser.parse_args()
 
@@ -584,6 +630,8 @@ def list_datasets() -> None:
         elif dataset.kind == "hf":
             defaults = ", ".join(dataset.hf_prefixes) if dataset.hf_prefixes else "none"
             extra = f" repo: {dataset.repo_id}, default prefixes: {defaults}"
+        elif dataset.kind == "wenetspeech":
+            extra = " official toolkit; requires WENETSPEECH_PASSWORD"
         print(f"- {key}: {dataset.name} [{dataset.kind}]{extra}")
 
 
@@ -692,9 +740,9 @@ def task_to_plan_item(task: DownloadTask, dataset_dir: Path, logical_ids: list[s
         "target_dir": str(dataset_dir),
         "files": task.files,
         "revision": task.revision or dataset.revision,
-        "hf_prefix": list(task.hf_prefix),
-        "hf_include": list(task.hf_include),
-        "hf_exclude": list(task.hf_exclude),
+        "hf_prefix": list(task.hf_prefix or dataset.hf_prefixes),
+        "hf_include": list(task.hf_include or dataset.hf_includes),
+        "hf_exclude": list(task.hf_exclude or dataset.hf_excludes),
         "hf_all": task.hf_all,
         "max_files": task.max_files,
         "requires_auth": dataset.requires_auth,
@@ -763,6 +811,8 @@ def describe_http_plan(
 def describe_hf_plan(dataset: DatasetSpec, dataset_dir: Path, args: argparse.Namespace) -> None:
     revision = args.revision or dataset.revision
     prefixes = tuple(args.hf_prefix) or dataset.hf_prefixes
+    includes = tuple(args.hf_include) or dataset.hf_includes
+    excludes = tuple(args.hf_exclude) or dataset.hf_excludes
     print(f"Dataset: {dataset.name} ({dataset.key})")
     print(f"Kind:    Hugging Face")
     print(f"Backend: {args.backend}")
@@ -770,8 +820,8 @@ def describe_hf_plan(dataset: DatasetSpec, dataset_dir: Path, args: argparse.Nam
     print(f"Repo:    {dataset.repo_id}@{revision}")
     print(f"Target:  {dataset_dir}")
     print(f"Prefix:  {', '.join(prefixes) if prefixes else '(none)'}")
-    print(f"Include: {', '.join(args.hf_include) if args.hf_include else '(none)'}")
-    print(f"Exclude: {', '.join(args.hf_exclude) if args.hf_exclude else '(none)'}")
+    print(f"Include: {', '.join(includes) if includes else '(none)'}")
+    print(f"Exclude: {', '.join(excludes) if excludes else '(none)'}")
     if dataset.requires_auth:
         print("Auth:    likely required; set HF_TOKEN or pass --hf-token")
     if dataset.requires_filter and not args.hf_all and not prefixes and not args.hf_include:
@@ -1213,11 +1263,44 @@ def parse_next_link(headers: object) -> str | None:
     return None
 
 
-def read_json_url(url: str, timeout: int, headers: dict[str, str]) -> tuple[object, str | None]:
-    req = request(url, headers=headers)
-    with urllib.request.urlopen(req, timeout=timeout) as response:
-        data = json.loads(response.read().decode("utf-8"))
-        return data, parse_next_link(response.headers)
+def is_retryable_http_error(exc: urllib.error.HTTPError) -> bool:
+    return exc.code in {408, 429, 500, 502, 503, 504}
+
+
+def read_json_url(
+    url: str,
+    timeout: int,
+    headers: dict[str, str],
+    *,
+    retries: int,
+    turbo: TurboLoader,
+    label: str,
+) -> tuple[object, str | None]:
+    attempts = max(retries, 1)
+    last_error: BaseException | None = None
+    for attempt in range(1, attempts + 1):
+        log(f"[hf_list] {label} attempt {attempt}/{attempts}")
+        try:
+            req = request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=timeout) as response:
+                data = json.loads(response.read().decode("utf-8"))
+                return data, parse_next_link(response.headers)
+        except urllib.error.HTTPError as exc:
+            last_error = exc
+            if not is_retryable_http_error(exc) or attempt == attempts:
+                raise
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            last_error = exc
+            if attempt == attempts:
+                raise
+
+        log(f"[hf_list_warn] {label} failed: {explain_exception(last_error, hf_context=True)}")
+        turbo.load_after_failure()
+        time.sleep(min(30, 2 ** min(attempt, 5)))
+
+    if last_error is not None:
+        raise last_error
+    raise DownloadError(f"failed to read Hugging Face API: {label}")
 
 
 def compile_patterns(patterns: Iterable[str], label: str) -> list[re.Pattern[str]]:
@@ -1230,7 +1313,24 @@ def compile_patterns(patterns: Iterable[str], label: str) -> list[re.Pattern[str
     return compiled
 
 
-def list_hf_files(dataset: DatasetSpec, args: argparse.Namespace, headers: dict[str, str]) -> list[FileSpec]:
+def hf_query_path_for_prefix(prefix: str) -> str:
+    clean = prefix.strip("/")
+    if not clean:
+        return ""
+    name = clean.rsplit("/", 1)[-1]
+    if "." in name and "/" in clean:
+        return clean.rsplit("/", 1)[0]
+    if "." in name:
+        return ""
+    return clean
+
+
+def list_hf_files(
+    dataset: DatasetSpec,
+    args: argparse.Namespace,
+    headers: dict[str, str],
+    turbo: TurboLoader,
+) -> list[FileSpec]:
     if not dataset.repo_id:
         raise DownloadError(f"{dataset.key} has no Hugging Face repo configured")
 
@@ -1239,45 +1339,70 @@ def list_hf_files(dataset: DatasetSpec, args: argparse.Namespace, headers: dict[
     if dataset.requires_filter and not args.hf_all and not prefixes and not args.hf_include:
         raise DownloadError(dataset.manual_message)
 
-    include_patterns = compile_patterns(args.hf_include, "--hf-include")
-    exclude_patterns = compile_patterns(args.hf_exclude, "--hf-exclude")
+    includes = tuple(args.hf_include) or dataset.hf_includes
+    excludes = tuple(args.hf_exclude) or dataset.hf_excludes
+    include_patterns = compile_patterns(includes, "--hf-include")
+    exclude_patterns = compile_patterns(excludes, "--hf-exclude")
 
-    url = hf_tree_url(dataset.repo_id, revision)
     selected: list[FileSpec] = []
-    while url:
-        payload, url = read_json_url(url, timeout=args.timeout, headers=headers)
-        if isinstance(payload, dict) and payload.get("error"):
-            raise DownloadError(str(payload["error"]))
-        if not isinstance(payload, list):
-            raise DownloadError(f"unexpected Hugging Face API response: {type(payload).__name__}")
+    seen: set[str] = set()
+    query_paths = [""]
+    if prefixes and not args.hf_all:
+        query_paths = sorted({hf_query_path_for_prefix(prefix) for prefix in prefixes})
 
-        for item in payload:
-            if not isinstance(item, dict) or item.get("type") != "file":
-                continue
-            path = item.get("path")
-            if not isinstance(path, str):
-                continue
-            if path in {"README.md", ".gitattributes"} and not args.hf_all:
-                continue
-            if prefixes and not any(path.startswith(prefix) for prefix in prefixes):
-                continue
-            if include_patterns and not any(pattern.search(path) for pattern in include_patterns):
-                continue
-            if exclude_patterns and any(pattern.search(path) for pattern in exclude_patterns):
-                continue
-
-            size = item.get("size")
-            size_bytes = size if isinstance(size, int) else None
-            selected.append(
-                FileSpec(
-                    key=path,
-                    filename=path,
-                    description=f"{dataset.repo_id}:{path}",
-                    urls=(hf_resolve_url(dataset.repo_id, revision, path),),
-                    size_bytes=size_bytes,
-                    display_size=format_size(size_bytes),
-                )
+    for query_path in query_paths:
+        url = hf_tree_url(dataset.repo_id, revision, query_path)
+        page_index = 0
+        while url:
+            page_index += 1
+            label = f"{dataset.repo_id}@{revision}:{query_path or '/'} page {page_index}"
+            payload, url = read_json_url(
+                url,
+                timeout=args.timeout,
+                headers=headers,
+                retries=args.retries,
+                turbo=turbo,
+                label=label,
             )
+            if isinstance(payload, dict) and payload.get("error"):
+                raise DownloadError(str(payload["error"]))
+            if not isinstance(payload, list):
+                raise DownloadError(f"unexpected Hugging Face API response: {type(payload).__name__}")
+
+            for item in payload:
+                if not isinstance(item, dict) or item.get("type") != "file":
+                    continue
+                path = item.get("path")
+                if not isinstance(path, str):
+                    continue
+                if path in {"README.md", ".gitattributes"} and not args.hf_all:
+                    continue
+                if prefixes and not any(path.startswith(prefix.strip("/")) for prefix in prefixes):
+                    continue
+                if include_patterns and not any(pattern.search(path) for pattern in include_patterns):
+                    continue
+                if exclude_patterns and any(pattern.search(path) for pattern in exclude_patterns):
+                    continue
+                if path in seen:
+                    continue
+                seen.add(path)
+
+                size = item.get("size")
+                size_bytes = size if isinstance(size, int) else None
+                selected.append(
+                    FileSpec(
+                        key=path,
+                        filename=path,
+                        description=f"{dataset.repo_id}:{path}",
+                        urls=(hf_resolve_url(dataset.repo_id, revision, path),),
+                        size_bytes=size_bytes,
+                        display_size=format_size(size_bytes),
+                    )
+                )
+        log(
+            f"[hf_list_done] {dataset.repo_id}@{revision}:{query_path or '/'}；"
+            f"matched_so_far={len(selected)}"
+        )
 
     selected.sort(key=lambda file_spec: file_spec.filename)
     if args.max_files is not None:
@@ -1490,7 +1615,7 @@ def download_hf_dataset(
 
     turbo.load_for_hf_if_auto()
     headers = auth_headers(args.hf_token)
-    files = list_hf_files(dataset, args, headers)
+    files = list_hf_files(dataset, args, headers, turbo)
     log(
         f"[dataset_start] {dataset.key} ({dataset.name})；kind=hf；"
         f"target={dataset_dir.expanduser().resolve()}；selected_files={len(files)}"
@@ -1532,6 +1657,192 @@ def download_hf_dataset(
     return downloaded
 
 
+def describe_wenetspeech_plan(dataset: DatasetSpec, dataset_dir: Path, args: argparse.Namespace) -> None:
+    toolkit_dir = args.wenetspeech_toolkit_dir or dataset_dir / "_toolkit" / "WenetSpeech"
+    download_dir = args.wenetspeech_download_dir or dataset_dir / "download"
+    untar_dir = args.wenetspeech_untar_dir or dataset_dir / "extracted"
+    print(f"Dataset: {dataset.name} ({dataset.key})")
+    print(f"Kind:    WenetSpeech official toolkit")
+    print(f"Source:  {dataset.source}")
+    print(f"Toolkit: {toolkit_dir}")
+    print(f"Download:{download_dir}")
+    print(f"Extract: {untar_dir}")
+    print()
+    print(dataset.manual_message)
+
+
+def read_wenetspeech_password(args: argparse.Namespace) -> str:
+    password_file = args.wenetspeech_password_file
+    env_file = os.environ.get("WENETSPEECH_PASSWORD_FILE")
+    if password_file is None and env_file:
+        password_file = Path(env_file)
+    if password_file is not None:
+        try:
+            password = password_file.expanduser().read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            raise DownloadError(f"failed to read WenetSpeech password file {password_file}: {exc}") from exc
+        if password:
+            return password
+        raise DownloadError(f"WenetSpeech password file is empty: {password_file}")
+
+    password = os.environ.get("WENETSPEECH_PASSWORD", "").strip()
+    if password:
+        return password
+
+    raise DownloadError(
+        "WenetSpeech 需要官方申请到的下载密码。请先在 WenetSpeech 官网申请，"
+        "然后设置 WENETSPEECH_PASSWORD 或 WENETSPEECH_PASSWORD_FILE。"
+    )
+
+
+def run_logged_process(
+    cmd: list[str],
+    *,
+    cwd: Path,
+    env: dict[str, str] | None = None,
+    label: str,
+) -> None:
+    log(f"[{label}] running: {' '.join(cmd)}")
+    process = subprocess.Popen(
+        cmd,
+        cwd=str(cwd),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    tail: list[str] = []
+    assert process.stdout is not None
+    for line in process.stdout:
+        text = line.rstrip()
+        if text:
+            tail.append(text)
+            tail = tail[-20:]
+            log(f"[{label}] {text}")
+    returncode = process.wait()
+    if returncode != 0:
+        raise DownloadError(
+            f"{label} failed with exit code {returncode}\n" + "\n".join(tail[-12:])
+        )
+
+
+def ensure_wenetspeech_toolkit(dataset_dir: Path, args: argparse.Namespace) -> tuple[Path, bool]:
+    toolkit_dir = (
+        args.wenetspeech_toolkit_dir.expanduser().resolve()
+        if args.wenetspeech_toolkit_dir
+        else (dataset_dir / "_toolkit" / "WenetSpeech").resolve()
+    )
+    managed_toolkit = args.wenetspeech_toolkit_dir is None
+    script = toolkit_dir / "utils" / "download_wenetspeech.sh"
+    if script.exists():
+        log(f"[wenetspeech] reuse toolkit: {toolkit_dir}")
+        return toolkit_dir, managed_toolkit
+    if toolkit_dir.exists():
+        raise DownloadError(
+            f"WenetSpeech toolkit directory exists but script is missing: {script}"
+        )
+    if not tool_path("git"):
+        raise DownloadError("git 未安装，无法自动获取 WenetSpeech 官方 toolkit")
+
+    toolkit_dir.parent.mkdir(parents=True, exist_ok=True)
+    run_logged_process(
+        ["git", "clone", "--depth", "1", WENETSPEECH_GIT_URL, str(toolkit_dir)],
+        cwd=toolkit_dir.parent,
+        label="wenetspeech_git",
+    )
+    if not script.exists():
+        raise DownloadError(f"WenetSpeech toolkit clone completed but script is missing: {script}")
+    return toolkit_dir, managed_toolkit
+
+
+def cleanup_wenetspeech_toolkit(toolkit_dir: Path, password_path: Path, *, remove_toolkit: bool) -> None:
+    try:
+        if password_path.exists():
+            password_path.unlink()
+            log(f"[wenetspeech_cleanup] removed password file: {password_path}")
+    except OSError as exc:
+        log(f"[warn] failed to remove WenetSpeech password file {password_path}: {exc}")
+
+    if not remove_toolkit:
+        return
+    try:
+        if toolkit_dir.exists():
+            shutil.rmtree(toolkit_dir)
+            log(f"[wenetspeech_cleanup] removed toolkit: {toolkit_dir}")
+        parent = toolkit_dir.parent
+        if parent.name == "_toolkit" and parent.exists() and not any(parent.iterdir()):
+            parent.rmdir()
+            log(f"[wenetspeech_cleanup] removed empty toolkit dir: {parent}")
+    except OSError as exc:
+        log(f"[warn] failed to remove WenetSpeech toolkit {toolkit_dir}: {exc}")
+
+
+def download_wenetspeech_dataset(
+    dataset: DatasetSpec,
+    dataset_dir: Path,
+    args: argparse.Namespace,
+) -> list[Path]:
+    if args.dry_run:
+        describe_wenetspeech_plan(dataset, dataset_dir, args)
+        return []
+
+    if not tool_path("wget"):
+        raise DownloadError("wget 未安装，WenetSpeech 官方下载脚本需要 wget")
+    if not tool_path("openssl"):
+        raise DownloadError("openssl 未安装，WenetSpeech 官方下载脚本需要 openssl")
+
+    dataset_dir.mkdir(parents=True, exist_ok=True)
+    password = read_wenetspeech_password(args)
+    toolkit_dir, managed_toolkit = ensure_wenetspeech_toolkit(dataset_dir, args)
+    download_dir = (
+        args.wenetspeech_download_dir.expanduser().resolve()
+        if args.wenetspeech_download_dir
+        else (dataset_dir / "download").resolve()
+    )
+    untar_dir = (
+        args.wenetspeech_untar_dir.expanduser().resolve()
+        if args.wenetspeech_untar_dir
+        else (dataset_dir / "extracted").resolve()
+    )
+    download_dir.mkdir(parents=True, exist_ok=True)
+    untar_dir.mkdir(parents=True, exist_ok=True)
+
+    safebox = toolkit_dir / "SAFEBOX"
+    safebox.mkdir(parents=True, exist_ok=True)
+    password_path = safebox / "password"
+    password_path.write_text(password + "\n", encoding="utf-8")
+    os.chmod(password_path, 0o600)
+
+    try:
+        log(
+            f"[dataset_start] {dataset.key} ({dataset.name})；kind=wenetspeech；"
+            f"download={download_dir}；extract={untar_dir}"
+        )
+        run_logged_process(
+            ["bash", "utils/download_wenetspeech.sh", str(download_dir), str(untar_dir)],
+            cwd=toolkit_dir,
+            label="wenetspeech",
+        )
+    finally:
+        cleanup_wenetspeech_toolkit(
+            toolkit_dir,
+            password_path,
+            remove_toolkit=managed_toolkit and not args.keep_wenetspeech_toolkit,
+        )
+
+    state = load_state(dataset_dir)
+    state.setdefault("files", {})["official_toolkit"] = {
+        "filename": str(untar_dir),
+        "size_bytes": None,
+        "completed_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+        "urls": [WENETSPEECH_GIT_URL, dataset.source],
+    }
+    save_state(dataset_dir, dataset, state)
+    log(f"[wenetspeech_done] extracted_dir={untar_dir}")
+    return [untar_dir]
+
+
 def maybe_extract(paths: Iterable[Path], dataset_dir: Path, keep_archives: bool) -> None:
     extract_dir = dataset_dir / "extracted"
     paths = list(paths)
@@ -1571,6 +1882,8 @@ def run_dataset_download(dataset: DatasetSpec, dataset_dir: Path, args: argparse
         return download_http_dataset(dataset, dataset_dir, args, turbo)
     if dataset.kind == "hf":
         return download_hf_dataset(dataset, dataset_dir, args, turbo)
+    if dataset.kind == "wenetspeech":
+        return download_wenetspeech_dataset(dataset, dataset_dir, args)
     raise DownloadError(f"unsupported dataset kind: {dataset.kind}")
 
 
@@ -1621,7 +1934,7 @@ def run_profile(args: argparse.Namespace, turbo: TurboLoader) -> int:
             f"(dedup_key={task.dedup_key})；target={dataset_dir}"
         )
         downloaded = run_dataset_download(dataset, dataset_dir, task_args, turbo)
-        if task_args.extract and downloaded:
+        if task_args.extract and downloaded and dataset.kind in {"http", "hf"}:
             maybe_extract(downloaded, dataset_dir, keep_archives=task_args.keep_archives)
         if dataset.kind == "manual":
             log(f"[manual] 数据集 {dataset.key} 需要手动下载；目标位置：{dataset_dir.expanduser().resolve()}")
@@ -1660,7 +1973,7 @@ def main() -> int:
             describe_manual(dataset, dataset_dir)
             return 0 if args.dry_run else 2
         downloaded = run_dataset_download(dataset, dataset_dir, args, turbo)
-        if args.extract and downloaded:
+        if args.extract and downloaded and dataset.kind in {"http", "hf"}:
             maybe_extract(downloaded, dataset_dir, keep_archives=args.keep_archives)
         if not args.dry_run:
             log_dataset_success(

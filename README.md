@@ -34,6 +34,7 @@ export MODEL_ROOT=/data/soulx/models
 export CACHE_ROOT=/data/soulx/cache
 export OUTPUT_ROOT=/data/soulx/outputs
 export HF_TOKEN=hf_xxx
+export WENETSPEECH_PASSWORD='你的 WenetSpeech 官方密码'
 
 docker compose build
 docker compose run --rm soulx bash
@@ -145,8 +146,11 @@ datasets/README.md
 ```bash
 cd /root/SoulX-Duplug/datasets
 export HF_TOKEN=hf_xxx
+export WENETSPEECH_PASSWORD='你的 WenetSpeech 官方密码'
 ./download_all_datasets.sh
 ```
+
+WenetSpeech 官方 toolkit 会由脚本自动 clone 并在下载后清理，不需要手动保留该仓库。
 
 下载日志：
 
@@ -163,6 +167,8 @@ export DATA_ROOT=/data/soulx/datasets
 export MODEL_ROOT=/data/soulx/models
 export CACHE_ROOT=/data/soulx/cache
 export OUTPUT_ROOT=/data/soulx/outputs
+export HF_TOKEN=hf_xxx
+export WENETSPEECH_PASSWORD='你的 WenetSpeech 官方密码'
 ```
 
 下载模型：

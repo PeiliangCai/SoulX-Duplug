@@ -152,7 +152,7 @@ def _text_from_obj(obj: dict[str, Any]) -> str:
 
 
 def _audio_from_obj(obj: dict[str, Any]) -> str | None:
-    for key in ("wav", "audio", "audio_path", "path", "file", "filepath", "clip"):
+    for key in ("wav", "wav_path", "audio", "audio_path", "path", "file", "filepath", "clip"):
         value = obj.get(key)
         if value:
             return str(value)
@@ -221,11 +221,20 @@ def _split_from_subset(value: Any) -> str:
 
 
 def _record_id(dataset: str, obj: dict[str, Any], audio_path: Path, index: int) -> str:
-    for key in ("utt_id", "id", "sid", "segment_id", "key", "aid"):
+    for key in ("utt_id", "id", "index", "sid", "segment_id", "key", "aid"):
         value = obj.get(key)
         if value:
             return str(value)
     return f"{dataset}-{audio_path.stem}-{index:08d}"
+
+
+def _is_voxbox_root(root: Path) -> bool:
+    return root.name.lower() == "voxbox"
+
+
+def _path_has_token(path: Path, token: str) -> bool:
+    token = token.lower()
+    return any(token in part.lower() for part in path.parts)
 
 
 def _record_with_optional_metadata(record: Stage1Record, read_metadata: bool) -> Stage1Record:
@@ -448,6 +457,8 @@ def parse_commonvoice_dataset(
         print(f"[skip] {dataset} dir not found under {data_root}")
         return []
 
+    lang_tags = {"zh": {"zh", "cn", "chinese", "mandarin"}, "en": {"en", "eng", "english"}}[lang]
+    voxbox_token = "commonvoice_cn" if lang == "zh" else "commonvoice_en"
     records: list[Stage1Record] = []
     seen: set[str] = set()
     for root in roots:
@@ -483,6 +494,36 @@ def parse_commonvoice_dataset(
                         records.append(_record_with_optional_metadata(record, read_metadata))
             except OSError as exc:
                 print(f"[warn] failed to read Common Voice TSV {tsv_path}: {exc}")
+
+        metadata_paths = sorted(root.rglob("*.jsonl")) + sorted(root.rglob("*.jsonl.gz"))
+        for metadata_path in metadata_paths:
+            if _is_voxbox_root(root) and not _path_has_token(metadata_path, voxbox_token):
+                continue
+            for idx, obj in enumerate(iter_jsonl(metadata_path), start=1):
+                obj_lang = str(obj.get("language") or obj.get("lang") or "").lower()
+                if obj_lang and obj_lang not in lang_tags:
+                    continue
+                rel_audio = _audio_from_obj(obj)
+                audio_path = resolve_audio_path(rel_audio, [metadata_path.parent, root])
+                text = normalize_text(_text_from_obj(obj), lang, dataset=dataset)
+                if not audio_path or not text:
+                    continue
+                utt_id = _record_id(dataset, obj, audio_path, idx)
+                key = f"{dataset}:{utt_id}:{audio_path}"
+                if key in seen:
+                    continue
+                seen.add(key)
+                record = Stage1Record(
+                    utt_id=utt_id,
+                    dataset=dataset,
+                    split=_split_from_subset(obj.get("split")) if obj.get("split") else _split_from_path(metadata_path),
+                    lang=lang,
+                    audio_path=str(audio_path),
+                    text=text,
+                    speaker_id=_speaker_from_obj(obj),
+                    duration=_duration_from_obj(obj),
+                )
+                records.append(_record_with_optional_metadata(record, read_metadata))
     print(f"[manifest] {dataset}: parsed {len(records)} Common Voice records")
     return records
 
@@ -503,6 +544,7 @@ def parse_emilia_dataset(
     read_metadata: bool = False,
 ) -> list[Stage1Record]:
     lang_tags = {"zh": {"zh", "cn", "chinese", "mandarin"}, "en": {"en", "eng", "english"}}[lang]
+    voxbox_token = "emilia_zh" if lang == "zh" else "emilia_en"
     roots = candidate_roots(data_root, dataset, "emilia", "Emilia", "voxbox")
     if not roots:
         print(f"[skip] {dataset} dir not found under {data_root}")
@@ -513,6 +555,8 @@ def parse_emilia_dataset(
     for root in roots:
         metadata_paths = sorted(root.rglob("*.jsonl")) + sorted(root.rglob("*.jsonl.gz"))
         for metadata_path in metadata_paths:
+            if _is_voxbox_root(root) and not _path_has_token(metadata_path, voxbox_token):
+                continue
             for idx, obj in enumerate(iter_jsonl(metadata_path), start=1):
                 obj_lang = str(obj.get("language") or obj.get("lang") or "").lower()
                 if obj_lang and obj_lang not in lang_tags:

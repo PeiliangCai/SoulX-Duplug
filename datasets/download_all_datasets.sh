@@ -71,9 +71,25 @@ if ! command -v conda >/dev/null 2>&1; then
   exit 1
 fi
 
-if ! command -v aria2c >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
+if grep -q "source_dataset: wenetspeech" "$PROFILE"; then
+  if [[ -z "${WENETSPEECH_PASSWORD:-}" && -z "${WENETSPEECH_PASSWORD_FILE:-}" ]]; then
+    echo "请先申请 WenetSpeech 官方下载密码，然后设置："
+    echo "  export WENETSPEECH_PASSWORD='你的密码'"
+    echo "或者："
+    echo "  export WENETSPEECH_PASSWORD_FILE=/path/to/wenetspeech_password.txt"
+    exit 1
+  fi
+fi
+
+APT_PACKAGES=()
+command -v aria2c >/dev/null 2>&1 || APT_PACKAGES+=(aria2)
+command -v git >/dev/null 2>&1 || APT_PACKAGES+=(git)
+command -v wget >/dev/null 2>&1 || APT_PACKAGES+=(wget)
+command -v openssl >/dev/null 2>&1 || APT_PACKAGES+=(openssl)
+
+if (( ${#APT_PACKAGES[@]} > 0 )) && command -v apt-get >/dev/null 2>&1; then
   apt-get update
-  apt-get install -y aria2
+  apt-get install -y "${APT_PACKAGES[@]}"
 fi
 
 eval "$(conda shell.bash hook)"

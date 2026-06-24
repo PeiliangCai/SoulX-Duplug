@@ -20,7 +20,7 @@ datasets:
     lang: zh
     download:
       source_dataset: wenetspeech
-      dedup_key: manual:wenetspeech
+      dedup_key: wenetspeech:official
   - id: magicdata
     lang: zh
     download:
@@ -31,15 +31,16 @@ datasets:
     lang: zh
     provider: voxbox
     download:
-      source_dataset: voxbox
-      hf_include:
-        - "(?i)(commonvoice|common_voice|cv).*(zh|cn|chinese|mandarin)"
+      source_dataset: commonvoice-cn
       dedup_key: voxbox:commonvoice:zh
   - id: emilia-cn
     lang: zh
     provider: voxbox
     download:
       source_dataset: voxbox
+      hf_prefix:
+        - "audios/emilia_zh/"
+        - "metadata/"
       hf_include:
-        - "(?i)(emilia).*(zh|cn|chinese|mandarin)"
+        - "(?i)(^audios/emilia_zh/|^metadata/emilia_zh\\.jsonl$)"
       dedup_key: voxbox:emilia:zh
