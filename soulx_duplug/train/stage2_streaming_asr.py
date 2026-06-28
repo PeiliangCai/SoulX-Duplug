@@ -40,6 +40,7 @@ from soulx_duplug.metrics import cer, wer
 from soulx_duplug.models.speech_tokenizer import SpeechTokenizerBackend, build_speech_tokenizer
 from soulx_duplug.models.streaming_asr_model import InterleavedBatch, build_interleaved_asr_model
 from soulx_duplug.models.text_tokenizer import CharTokenizer, TextTokenizer, load_text_tokenizer
+from soulx_duplug.train.checkpoint_utils import load_training_checkpoint, resolve_resume_checkpoint
 from soulx_duplug.train.stage1_asr import build_text_tokenizer
 from soulx_duplug.training_curves import TrainingCurveTracker
 
@@ -564,6 +565,25 @@ def train(config: dict[str, Any], log_file: str | Path | None = None) -> Path:
         eval_log_examples = max(0, int(train_cfg.get("eval_log_examples", 3)))
         plot_every = max(0, int(train_cfg.get("plot_every", 100)))
         plot_smoothing_window = max(1, int(train_cfg.get("plot_smoothing_window", 20)))
+        resume_checkpoint = resolve_resume_checkpoint(
+            checkpoint_dir,
+            train_cfg,
+            logger=logger,
+            stage="stage2",
+            is_main=context.is_main,
+        )
+        start_step = 0
+        if resume_checkpoint is not None:
+            start_step = load_training_checkpoint(
+                checkpoint_dir=resume_checkpoint,
+                model=model,
+                optimizer=optimizer,
+                device=device,
+                logger=logger,
+                stage="stage2",
+                is_main=context.is_main,
+            )
+        barrier(context)
         curve_tracker = TrainingCurveTracker(
             output_dir=run_output_dir,
             stage="stage2",
@@ -590,11 +610,13 @@ def train(config: dict[str, Any], log_file: str | Path | None = None) -> Path:
             eval_log_examples=eval_log_examples,
             plot_every=plot_every,
             plot_smoothing_window=plot_smoothing_window,
+            resume_from_checkpoint=str(resume_checkpoint) if resume_checkpoint else None,
+            start_step=start_step,
         )
 
-        step = 0
+        step = start_step
         epoch = 0
-        last_checkpoint = checkpoint_dir
+        last_checkpoint = resume_checkpoint or checkpoint_dir
         while step < max_steps:
             if train_sampler is not None:
                 train_sampler.set_epoch(epoch)

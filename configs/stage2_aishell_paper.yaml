@@ -26,6 +26,7 @@ data:
   max_sequence_length: 4096
 
 training:
+  resume_from_checkpoint: latest
   batch_size: 1
   eval_batch_size: 1
   gradient_accumulation_steps: 16

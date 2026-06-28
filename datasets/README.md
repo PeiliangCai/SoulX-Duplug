@@ -13,6 +13,22 @@ export WENETSPEECH_PASSWORD='你的 WenetSpeech 官方密码'
 export WENETSPEECH_PASSWORD_FILE=/path/to/wenetspeech_password.txt
 ```
 
+只下载 WenetSpeech 压缩包、不解压：
+
+```bash
+python3 download_asr_datasets.py \
+  --dataset wenetspeech \
+  --out-dir /data/soulx/datasets \
+  --log-file /data/soulx/datasets/download.log \
+  --wenetspeech-download-only
+```
+
+压缩包目录：
+
+```text
+/data/soulx/datasets/wenetspeech/download
+```
+
 重复执行不会重复创建虚拟环境；默认复用：
 
 ```bash

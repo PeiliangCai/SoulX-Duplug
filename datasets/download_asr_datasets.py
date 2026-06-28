@@ -33,6 +33,7 @@ STATE_FILE = ".download-state.json"
 USER_AGENT = "soulx-duplug-dataset-downloader/1.0"
 HF_ENDPOINT = "https://huggingface.co"
 WENETSPEECH_GIT_URL = "https://github.com/wenet-e2e/WenetSpeech.git"
+WENETSPEECH_RELEASE_URL = "http://wenet.meeting.tencent.com/WenetSpeech"
 LOG_FILE: Path | None = None
 
 
@@ -605,6 +606,11 @@ def parse_args() -> argparse.Namespace:
         "--keep-wenetspeech-toolkit",
         action="store_true",
         help="Keep the cloned WenetSpeech toolkit after download for debugging.",
+    )
+    parser.add_argument(
+        "--wenetspeech-download-only",
+        action="store_true",
+        help="Download WenetSpeech encrypted archives only and skip extraction.",
     )
     parser.add_argument(
         "--wenetspeech-download-dir",
@@ -1666,7 +1672,7 @@ def describe_wenetspeech_plan(dataset: DatasetSpec, dataset_dir: Path, args: arg
     print(f"Source:  {dataset.source}")
     print(f"Toolkit: {toolkit_dir}")
     print(f"Download:{download_dir}")
-    print(f"Extract: {untar_dir}")
+    print(f"Extract: {'skipped' if args.wenetspeech_download_only else untar_dir}")
     print()
     print(dataset.manual_message)
 
@@ -1727,6 +1733,19 @@ def run_logged_process(
         )
 
 
+def md5sum(path: Path, chunk_size: int = 1024 * 1024 * 8) -> str:
+    import hashlib
+
+    digest = hashlib.md5()
+    with path.open("rb") as f:
+        while True:
+            chunk = f.read(chunk_size)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def ensure_wenetspeech_toolkit(dataset_dir: Path, args: argparse.Namespace) -> tuple[Path, bool]:
     toolkit_dir = (
         args.wenetspeech_toolkit_dir.expanduser().resolve()
@@ -1778,10 +1797,113 @@ def cleanup_wenetspeech_toolkit(toolkit_dir: Path, password_path: Path, *, remov
         log(f"[warn] failed to remove WenetSpeech toolkit {toolkit_dir}: {exc}")
 
 
+def wenetspeech_archive_specs(toolkit_dir: Path) -> list[FileSpec]:
+    list_path = toolkit_dir / "metadata" / "v1.list"
+    if not list_path.exists():
+        raise DownloadError(f"WenetSpeech metadata list not found: {list_path}")
+
+    files: list[FileSpec] = [
+        FileSpec(
+            key="TERMS_OF_ACCESS",
+            filename="TERMS_OF_ACCESS",
+            description="WenetSpeech terms of access",
+            urls=(f"{WENETSPEECH_RELEASE_URL}/TERMS_OF_ACCESS",),
+        )
+    ]
+    for line in list_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        remote_md5, obj = parts[0], parts[1]
+        files.append(
+            FileSpec(
+                key=obj,
+                filename=obj,
+                description="WenetSpeech encrypted archive",
+                urls=(f"{WENETSPEECH_RELEASE_URL}/{obj}",),
+                md5=remote_md5,
+            )
+        )
+    if len(files) <= 1:
+        raise DownloadError(f"WenetSpeech metadata list has no archive entries: {list_path}")
+    return files
+
+
+def download_wenetspeech_archives_only(
+    dataset: DatasetSpec,
+    dataset_dir: Path,
+    args: argparse.Namespace,
+    turbo: TurboLoader,
+    toolkit_dir: Path,
+) -> list[Path]:
+    download_dir = (
+        args.wenetspeech_download_dir.expanduser().resolve()
+        if args.wenetspeech_download_dir
+        else (dataset_dir / "download").resolve()
+    )
+    download_dir.mkdir(parents=True, exist_ok=True)
+    files = wenetspeech_archive_specs(toolkit_dir)
+    log(
+        f"[dataset_start] {dataset.key} ({dataset.name})；kind=wenetspeech_archives；"
+        f"download={download_dir}；files={len(files)}"
+    )
+
+    state = load_state(dataset_dir)
+    downloaded: list[Path] = []
+    for file_spec in files:
+        final_path = download_dir / file_spec.filename
+        state_entry = state_entry_for(state, file_spec.key)
+        if final_path.exists() and file_spec.md5:
+            observed_md5 = md5sum(final_path)
+            if observed_md5 == file_spec.md5:
+                log(f"[skip] {final_path} already exists and matches md5.")
+                write_state_entry(state, file_spec, final_path)
+                state["files"][file_spec.key]["md5"] = file_spec.md5
+                save_state(dataset_dir, dataset, state)
+                downloaded.append(final_path)
+                continue
+            log(
+                f"[warn] {final_path} md5 mismatch；"
+                f"expected={file_spec.md5} observed={observed_md5}；redownloading"
+            )
+            final_path.unlink()
+
+        final_path = download_file_with_backend(
+            file_spec=file_spec,
+            dataset_dir=download_dir,
+            args=args,
+            turbo=turbo,
+            state_entry=state_entry,
+        )
+        if file_spec.md5:
+            observed_md5 = md5sum(final_path)
+            if observed_md5 != file_spec.md5:
+                final_path.unlink(missing_ok=True)
+                raise DownloadError(
+                    f"WenetSpeech archive md5 mismatch for {file_spec.filename}: "
+                    f"expected={file_spec.md5} observed={observed_md5}"
+                )
+        write_state_entry(state, file_spec, final_path)
+        if file_spec.md5:
+            state["files"][file_spec.key]["md5"] = file_spec.md5
+        save_state(dataset_dir, dataset, state)
+        downloaded.append(final_path)
+
+    log(
+        f"[wenetspeech_archives_done] download_dir={download_dir}；"
+        f"files={len(downloaded)}"
+    )
+    return downloaded
+
+
 def download_wenetspeech_dataset(
     dataset: DatasetSpec,
     dataset_dir: Path,
     args: argparse.Namespace,
+    turbo: TurboLoader,
 ) -> list[Path]:
     if args.dry_run:
         describe_wenetspeech_plan(dataset, dataset_dir, args)
@@ -1795,6 +1917,16 @@ def download_wenetspeech_dataset(
     dataset_dir.mkdir(parents=True, exist_ok=True)
     password = read_wenetspeech_password(args)
     toolkit_dir, managed_toolkit = ensure_wenetspeech_toolkit(dataset_dir, args)
+    if args.wenetspeech_download_only:
+        try:
+            return download_wenetspeech_archives_only(dataset, dataset_dir, args, turbo, toolkit_dir)
+        finally:
+            cleanup_wenetspeech_toolkit(
+                toolkit_dir,
+                toolkit_dir / "SAFEBOX" / "password",
+                remove_toolkit=managed_toolkit and not args.keep_wenetspeech_toolkit,
+            )
+
     download_dir = (
         args.wenetspeech_download_dir.expanduser().resolve()
         if args.wenetspeech_download_dir
@@ -1883,7 +2015,7 @@ def run_dataset_download(dataset: DatasetSpec, dataset_dir: Path, args: argparse
     if dataset.kind == "hf":
         return download_hf_dataset(dataset, dataset_dir, args, turbo)
     if dataset.kind == "wenetspeech":
-        return download_wenetspeech_dataset(dataset, dataset_dir, args)
+        return download_wenetspeech_dataset(dataset, dataset_dir, args, turbo)
     raise DownloadError(f"unsupported dataset kind: {dataset.kind}")
 
 
