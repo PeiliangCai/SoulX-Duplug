@@ -4,8 +4,6 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-USE_DOCKER="${USE_DOCKER:-auto}"
-IN_SOULX_DOCKER="${IN_SOULX_DOCKER:-0}"
 RUN_STAGE="${RUN_STAGE:-all}"
 PROFILE="${PROFILE:-configs/data/paper_all.yaml}"
 STAGE1_CONFIG="${STAGE1_CONFIG:-configs/stage1_paper_all.yaml}"
@@ -15,62 +13,32 @@ MODEL_ROOT="${MODEL_ROOT:-/data/soulx/models}"
 CACHE_ROOT="${CACHE_ROOT:-/data/soulx/cache}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-/data/soulx/outputs}"
 PIPELINE_LOG="${PIPELINE_LOG:-$OUTPUT_ROOT/stage12_pipeline.log}"
-PIPELINE_TEE="${PIPELINE_TEE:-1}"
 STAGE1_MANIFEST_DIR="${STAGE1_MANIFEST_DIR:-manifests/stage1_paper_all}"
 STAGE2_MANIFEST_DIR="${STAGE2_MANIFEST_DIR:-manifests/stage2_paper_all}"
 ALIGN_DEVICE="${ALIGN_DEVICE:-cuda}"
 SKIP_MODEL_DOWNLOAD="${SKIP_MODEL_DOWNLOAD:-0}"
 SKIP_DATASET_VERIFY="${SKIP_DATASET_VERIFY:-0}"
 FORCE_PREPARE="${FORCE_PREPARE:-0}"
+SETUP_CONDA="${SETUP_CONDA:-1}"
+ALLOW_STAGE2_WITHOUT_STAGE1="${ALLOW_STAGE2_WITHOUT_STAGE1:-0}"
+CONDA_ENV_DIR="${CONDA_ENV_DIR:-$CACHE_ROOT/conda_envs/soulx-duplug}"
+CONDA_PYTHON_VERSION="${CONDA_PYTHON_VERSION:-3.10}"
+PYTORCH_VERSION="${PYTORCH_VERSION:-2.1.2}"
+PYTORCH_CUDA="${PYTORCH_CUDA:-11.8}"
+INSTALL_DEPS="${INSTALL_DEPS:-auto}"
 
 DATASETS_FOR_VERIFY="aishell1,aishell3,wenetspeech,magicdata,commonvoice-cn,emilia-cn,librispeech,gigaspeech,commonvoice-en,emilia-en"
 
-host_uses_docker() {
-  if [[ "$USE_DOCKER" == "0" || "$USE_DOCKER" == "false" ]]; then
-    return 1
-  fi
-  if [[ "$USE_DOCKER" == "1" || "$USE_DOCKER" == "true" ]]; then
-    return 0
-  fi
-  command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1
-}
-
-if [[ "$IN_SOULX_DOCKER" != "1" ]] && host_uses_docker; then
-  mkdir -p "$OUTPUT_ROOT"
-  exec > >(tee -a "$PIPELINE_LOG") 2>&1
-  echo "[pipeline] host docker mode"
-  echo "[pipeline] DATA_ROOT=$DATA_ROOT MODEL_ROOT=$MODEL_ROOT CACHE_ROOT=$CACHE_ROOT OUTPUT_ROOT=$OUTPUT_ROOT"
-  docker compose build
-  exec docker compose run --rm \
-    -e IN_SOULX_DOCKER=1 \
-    -e RUN_STAGE="$RUN_STAGE" \
-    -e PROFILE="$PROFILE" \
-    -e STAGE1_CONFIG="$STAGE1_CONFIG" \
-    -e STAGE2_CONFIG="$STAGE2_CONFIG" \
-    -e DATA_ROOT=/data/datasets \
-    -e MODEL_ROOT=/data/models \
-    -e CACHE_ROOT=/data/cache \
-    -e OUTPUT_ROOT=/data/outputs \
-    -e PIPELINE_LOG=/data/outputs/stage12_pipeline.log \
-    -e PIPELINE_TEE=0 \
-    -e ALIGN_DEVICE="$ALIGN_DEVICE" \
-    -e SKIP_MODEL_DOWNLOAD="$SKIP_MODEL_DOWNLOAD" \
-    -e SKIP_DATASET_VERIFY="$SKIP_DATASET_VERIFY" \
-    -e FORCE_PREPARE="$FORCE_PREPARE" \
-    soulx ./scripts/run_stage12_pipeline.sh
-fi
-
 mkdir -p "$(dirname "$PIPELINE_LOG")" "$OUTPUT_ROOT" "$CACHE_ROOT" "$MODEL_ROOT"
-if [[ "$PIPELINE_TEE" == "1" ]]; then
-  exec > >(tee -a "$PIPELINE_LOG") 2>&1
-fi
+exec > >(tee -a "$PIPELINE_LOG") 2>&1
 
 echo "[pipeline] start $(date '+%Y-%m-%d %H:%M:%S')"
-echo "[pipeline] mode=$([[ "$IN_SOULX_DOCKER" == "1" ]] && echo docker || echo native) run_stage=$RUN_STAGE"
+echo "[pipeline] mode=conda run_stage=$RUN_STAGE"
 echo "[pipeline] DATA_ROOT=$DATA_ROOT"
 echo "[pipeline] MODEL_ROOT=$MODEL_ROOT"
 echo "[pipeline] CACHE_ROOT=$CACHE_ROOT"
 echo "[pipeline] OUTPUT_ROOT=$OUTPUT_ROOT"
+echo "[pipeline] CONDA_ENV_DIR=$CONDA_ENV_DIR"
 echo "[pipeline] log=$PIPELINE_LOG"
 
 case "$RUN_STAGE" in
@@ -81,10 +49,88 @@ case "$RUN_STAGE" in
     ;;
 esac
 
-if [[ "$IN_SOULX_DOCKER" != "1" && "$USE_DOCKER" != "0" && "$USE_DOCKER" != "false" ]]; then
-  echo "[error] Docker is unavailable. Install Docker/NVIDIA Container Toolkit, or run with USE_DOCKER=0 inside a prepared environment." >&2
-  exit 2
-fi
+safe_remove_env_dir() {
+  local target
+  target="$(cd "$(dirname "$CONDA_ENV_DIR")" && pwd)/$(basename "$CONDA_ENV_DIR")"
+  case "$target" in
+    "/"|"$HOME"|"$ROOT_DIR"|"$ROOT_DIR/.."|"$DATA_ROOT"|"$MODEL_ROOT"|"$CACHE_ROOT"|"$OUTPUT_ROOT")
+      echo "[error] refusing to remove unsafe CONDA_ENV_DIR: $target" >&2
+      return 1
+      ;;
+  esac
+  rm -rf "$target"
+}
+
+setup_conda_env() {
+  if [[ "$SETUP_CONDA" == "0" || "$SETUP_CONDA" == "false" ]]; then
+    echo "[env] skip conda setup; using current Python environment"
+    return
+  fi
+  if ! command -v conda >/dev/null 2>&1; then
+    echo "[error] conda not found. Install Miniconda/Anaconda first, or run with SETUP_CONDA=0 inside a prepared env." >&2
+    exit 2
+  fi
+
+  mkdir -p "$CACHE_ROOT" "$(dirname "$CONDA_ENV_DIR")"
+  export CONDA_PKGS_DIRS="${CONDA_PKGS_DIRS:-$CACHE_ROOT/conda_pkgs}"
+  mkdir -p "$CONDA_PKGS_DIRS"
+
+  eval "$(conda shell.bash hook)"
+
+  if [[ -d "$CONDA_ENV_DIR/conda-meta" ]]; then
+    echo "[env] reuse existing conda env: $CONDA_ENV_DIR"
+  else
+    if [[ -e "$CONDA_ENV_DIR" ]]; then
+      echo "[env] invalid conda env path exists; rebuild: $CONDA_ENV_DIR"
+      safe_remove_env_dir
+    fi
+    echo "[env] create conda env: $CONDA_ENV_DIR python=$CONDA_PYTHON_VERSION"
+    conda create -p "$CONDA_ENV_DIR" "python=$CONDA_PYTHON_VERSION" -y
+  fi
+
+  conda activate "$CONDA_ENV_DIR"
+  echo "[env] active python=$(command -v python)"
+
+  if python - <<'PY' >/dev/null 2>&1
+import torch
+raise SystemExit(0 if torch.cuda.is_available() else 1)
+PY
+  then
+    python - <<'PY'
+import torch
+print(f"[env] torch already installed: {torch.__version__} cuda={torch.version.cuda} cuda_available={torch.cuda.is_available()}")
+PY
+  else
+    echo "[env] install PyTorch $PYTORCH_VERSION with CUDA $PYTORCH_CUDA"
+    conda install -p "$CONDA_ENV_DIR" -y \
+      "pytorch==$PYTORCH_VERSION" \
+      "torchaudio==$PYTORCH_VERSION" \
+      "pytorch-cuda=$PYTORCH_CUDA" \
+      -c pytorch -c nvidia
+  fi
+
+  local deps_stamp="$CONDA_ENV_DIR/.soulx_deps_installed"
+  local need_deps=0
+  if [[ "$INSTALL_DEPS" == "1" || "$INSTALL_DEPS" == "true" ]]; then
+    need_deps=1
+  elif [[ "$INSTALL_DEPS" == "0" || "$INSTALL_DEPS" == "false" ]]; then
+    need_deps=0
+  elif [[ ! -f "$deps_stamp" || requirements.txt -nt "$deps_stamp" ]]; then
+    need_deps=1
+  fi
+
+  if [[ "$need_deps" == "1" ]]; then
+    echo "[env] install system-level Python deps into conda env"
+    conda install -p "$CONDA_ENV_DIR" -y -c conda-forge ffmpeg libsndfile
+    python -m pip install --upgrade pip
+    python -m pip install -r requirements.txt
+    date '+%Y-%m-%d %H:%M:%S' > "$deps_stamp"
+  else
+    echo "[env] Python deps already installed; set INSTALL_DEPS=1 to reinstall"
+  fi
+}
+
+setup_conda_env
 
 python - <<'PY'
 import torch
@@ -212,6 +258,36 @@ prepare_stage2_manifest() {
       --chunk-seconds 0.16
 }
 
+ensure_stage1_checkpoint_for_stage2() {
+  local state_path
+  state_path="$(
+    python - "$STAGE2_CONFIG" <<'PY'
+import sys
+from pathlib import Path
+from soulx_duplug.config import load_yaml, resolve_path
+
+cfg = load_yaml(Path(sys.argv[1]))
+checkpoint = cfg.get("stage1_checkpoint")
+print(resolve_path(checkpoint) / "pytorch_model.bin" if checkpoint else "")
+PY
+  )"
+  if [[ -z "$state_path" ]]; then
+    echo "[pipeline] stage2 config has no stage1_checkpoint"
+    return
+  fi
+  if [[ -f "$state_path" ]]; then
+    echo "[pipeline] Stage 1 checkpoint ready: $state_path"
+    return
+  fi
+  if [[ "$ALLOW_STAGE2_WITHOUT_STAGE1" == "1" ]]; then
+    echo "[warn] Stage 1 checkpoint missing, but ALLOW_STAGE2_WITHOUT_STAGE1=1: $state_path"
+    return
+  fi
+  echo "[error] Stage 1 checkpoint missing for Stage 2: $state_path" >&2
+  echo "[error] Run Stage 1 first: RUN_STAGE=stage1 ./scripts/run_stage12_pipeline.sh" >&2
+  exit 2
+}
+
 case "$RUN_STAGE" in
   all|prepare|stage1)
     prepare_stage1_manifest
@@ -234,6 +310,7 @@ esac
 
 case "$RUN_STAGE" in
   all|stage2)
+    ensure_stage1_checkpoint_for_stage2
     echo "[pipeline] start Stage 2 training"
     ./scripts/train_stage2.sh "$STAGE2_CONFIG"
     ;;

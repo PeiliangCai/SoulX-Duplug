@@ -22,9 +22,7 @@
 
 ## 环境部署
 
-推荐用 Docker。新服务器只需要有 NVIDIA 驱动、Docker、NVIDIA Container Toolkit。
-
-注意：Docker 命令需要在宿主机执行。如果你已经进入了 AutoDL 这类平台提供的容器，通常不能再执行 `docker compose`，因为容器里没有 Docker daemon。
+推荐用 Conda。新服务器需要有 NVIDIA 驱动和 Conda；脚本会自动创建并复用 Conda 环境。
 
 ```bash
 cd /root/SoulX-Duplug
@@ -34,22 +32,25 @@ export MODEL_ROOT=/data/soulx/models
 export CACHE_ROOT=/data/soulx/cache
 export OUTPUT_ROOT=/data/soulx/outputs
 export HF_TOKEN=hf_xxx
-export WENETSPEECH_PASSWORD='你的 WenetSpeech 官方密码'
 
-docker compose build
-docker compose run --rm soulx bash
+./scripts/run_stage12_pipeline.sh
 ```
 
-如果只想直接在容器里跑命令：
+默认 Conda 环境位置：
+
+```text
+${CACHE_ROOT}/conda_envs/soulx-duplug
+```
+
+环境已存在时会直接复用，不会重复创建。需要更换环境位置时设置：
 
 ```bash
-docker compose run --rm soulx ./scripts/run_aishell_smoke.sh
-docker compose run --rm soulx python scripts/download_models.py --all
+export CONDA_ENV_DIR=/data/soulx/conda_envs/soulx-duplug
 ```
 
 ## 一键 Stage 1/2 训练
 
-新服务器上推荐直接用 Docker 一键启动。脚本会构建 Docker 环境、检查/下载模型、验证数据集、生成 manifest、启动 Stage 1，并在 Stage 1 完成后生成 Stage 2 对齐与 chunk manifest，再启动 Stage 2：
+新服务器上直接运行一键脚本。脚本会创建/复用 Conda 环境、安装 PyTorch CUDA 和依赖、检查/下载模型、验证数据集、生成 manifest、启动 Stage 1，并在 Stage 1 完成后生成 Stage 2 对齐与 chunk manifest，再启动 Stage 2：
 
 ```bash
 cd /root/SoulX-Duplug
@@ -76,6 +77,8 @@ Stage 1 完成后只跑 Stage 2：
 RUN_STAGE=stage2 ./scripts/run_stage12_pipeline.sh
 ```
 
+`RUN_STAGE=stage2` 会先生成/复用 Stage 2 manifest，然后检查 `${OUTPUT_ROOT}/stage1_paper_all/checkpoints/latest/pytorch_model.bin`。如果 Stage 1 checkpoint 不存在，脚本会停止，避免误用基础模型直接训练 Stage 2。
+
 一键脚本日志追加写入：
 
 ```text
@@ -95,8 +98,7 @@ training:
 requirements.txt
 ```
 
-Docker 仍然需要 `requirements.txt`，它用于安装 transformers、FunASR、WhisperX 等项目依赖。PyTorch/CUDA 不放在 requirements 里，由 Docker 的 PyTorch CUDA 基础镜像提供。
-非 Docker 手动安装时，也应先安装匹配服务器 CUDA 的 PyTorch，再执行：
+Conda 一键脚本会先安装 PyTorch CUDA，再用 `requirements.txt` 安装 transformers、FunASR、WhisperX 等项目依赖。手动安装时也应先安装匹配服务器 CUDA 的 PyTorch，再执行：
 
 ```bash
 pip install -r requirements.txt
